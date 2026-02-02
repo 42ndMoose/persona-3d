@@ -1,30 +1,39 @@
-import { SCHEMA_DESCRIPTION, SCHEMA_VERSION } from "./schema.js";
+import { SCHEMA_DESCRIPTION, SCHEMA_VERSION, AXES } from "./schema.js";
 
 export function buildPrimerPrompt(){
   return `You are a strict scoring engine for an essay-based personality test.
 
-Rules:
-- You MUST output JSON only. No markdown, no commentary.
-- You MUST follow the schema exactly.
-- You MUST score based on behavior patterns, tradeoffs, and emotional signals in the user’s answer.
-- You MUST allow stereotypes and strong judgments if the user expresses them. Do not censor the user.
-- You MUST detect when the user misses the point and set needs_clarification accordingly.
-- You MUST flag unserious/troll answers using playfulness and the risk flags.
+Hard rules:
+- Output JSON only. No markdown. No commentary.
+- Follow the schema exactly.
+- Score ONLY from the user's essay answer to the current question.
+- Ignore previous chat back-and-forth. Treat each answer as independent.
+- Allow strong opinions and stereotypes if the user expresses them. Do not censor the user.
+- Detect when the user misses the point and set needs_clarification accordingly.
+- Flag unserious answers using playfulness + likely_trolling.
+- Award effort points based on diagnostic richness, so a few strong answers can reach 100 total points.
 
-Core axes (0..100): practicality, empathy, knowledge, wisdom
-Meta axes (0..100): calibration, playfulness
+Axis scoring (0..100):
+- practicality, empathy, knowledge, wisdom
+Meta axes (0..100):
+- calibration, playfulness
 
-Calibration guidance:
-- High calibration: acknowledges uncertainty, updates beliefs, checks assumptions, stays grounded in reality.
-- Low calibration: confident nonsense, magical thinking, denial of obvious constraints, delusional leaps, refuses evidence.
+Effort points:
+- Give 0..50 points.
+- 0-5: useless / incoherent / pure troll
+- 10-20: basic answer, some signal
+- 25-35: strong answer, lots of signal
+- 40-50: extremely revealing, clear tradeoffs, self-awareness, consistent reasoning
+Target: 3-6 good answers should reach 100 total points.
 
-Output schema v1 (JSON only):
+Schema v2 (JSON only):
 {
   "schema_version": "${SCHEMA_VERSION}",
   "qid": "Qxx",
   "axes": { "practicality": 0, "empathy": 0, "knowledge": 0, "wisdom": 0 },
   "meta": { "calibration": 0, "playfulness": 0 },
   "confidence": { "practicality": 0, "empathy": 0, "knowledge": 0, "wisdom": 0, "calibration": 0 },
+  "effort": { "points_awarded": 0, "why": "" },
   "signals": {
     "key_quotes": ["max 3 short quotes <= 20 words each"],
     "observations": ["max 6 short bullet-like sentences"]
@@ -48,30 +57,80 @@ Output schema v1 (JSON only):
   }
 }
 
-If the user’s answer is unserious:
-- Set playfulness high
-- Set confidence low
-- Set likely_trolling true
-- Still try to extract any real signal, but be honest with low confidence.
+Confidence guidance:
+- High confidence only if the answer provides concrete reasoning, tradeoffs, and clear intent.
+- Low confidence if vague, inconsistent, performative, or unserious.
 
-If the user contradicts themselves, or gives fantasy that ignores reality constraints:
-- Lower calibration and confidence
-- Consider delusion_risk true if it’s extreme.
+Calibration guidance:
+- High: acknowledges uncertainty, updates beliefs, stays grounded in constraints.
+- Low: confident nonsense, magical thinking, ignores obvious reality constraints.
 
-Confirm: output JSON only.`;
+Confirm again: output JSON only.`;
 }
 
 export function buildQuestionPrompt(q){
   return `SCHEMA: ${JSON.stringify(SCHEMA_DESCRIPTION, null, 2)}
 
 TASK:
-Score the user’s answer to the question below.
-Output JSON ONLY, matching schema v1 exactly.
+Score the user's essay answer to the question below.
+Output JSON ONLY, matching schema v2 exactly.
+Score only from THIS answer, not from earlier chat context.
 
 Question ID: ${q.id}
 Role: ${q.role}
 Scenario:
 ${q.scenario}
 
-Now wait for the user’s essay answer.`;
+Now wait for the user's essay answer.`;
+}
+
+export function buildOverviewPrompt(bucketLabel, judgedAnswers){
+  // Provide only the answer JSON that was judged in this bucket
+  // Keep it compact-ish
+  const packed = judgedAnswers.map(a => ({
+    qid: a.qid,
+    axes: a.axes,
+    meta: a.meta,
+    confidence: a.confidence,
+    effort: a.effort,
+    notes: a.notes,
+    risk_flags: a.risk_flags,
+    signals: a.signals
+  }));
+
+  return `You are generating a persona overview based only on the scored answer records below.
+
+Hard rules:
+- Output JSON only.
+- Keep lengths stable: no long essays.
+- Use only the provided scored records.
+
+Output schema (persona_overview.v1):
+{
+  "schema_version": "persona_overview.v1",
+  "bucket_label": ${JSON.stringify(bucketLabel)},
+  "summary": {
+    "title": "",
+    "one_paragraph": "",
+    "strengths": ["max 5"],
+    "weaknesses": ["max 5"],
+    "growth_levers": ["max 5"],
+    "stress_pattern": "",
+    "decision_style": "",
+    "social_style": ""
+  },
+  "trait_breakdown": {
+    "practicality": "",
+    "empathy": "",
+    "knowledge": "",
+    "wisdom": "",
+    "calibration": "",
+    "playfulness": ""
+  },
+  "warnings": ["max 5"],
+  "confidence_note": ""
+}
+
+Here are the scored records (JSON):
+${JSON.stringify(packed, null, 2)}`;
 }
