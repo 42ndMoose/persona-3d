@@ -1,10 +1,11 @@
 export const SCHEMA_V1 = "persona.schema.v1";
 export const SCHEMA_V2 = "persona.schema.v2";
+export const SCHEMA_V3 = "persona.schema.v3";
 
-export const SCHEMA_VERSION = SCHEMA_V2;
+export const SCHEMA_VERSION = SCHEMA_V3;
 
 export const AXES = ["practicality","empathy","knowledge","wisdom"];
-export const META = ["calibration","playfulness"];
+export const META = ["calibration","frivolity"];
 
 export const SCHEMA_DESCRIPTION = {
   version: SCHEMA_VERSION,
@@ -17,8 +18,8 @@ export const SCHEMA_DESCRIPTION = {
     empathy: "Reads people, cares, protects dignity, avoids cruelty, understands feelings.",
     knowledge: "Breadth/depth of concepts, curiosity, retention, structured thinking.",
     wisdom: "Judgment, long-term thinking, ethics under pressure, sees second-order effects.",
-    calibration: "Groundedness + epistemic humility. Spots uncertainty, updates beliefs, avoids magical thinking.",
-    playfulness: "Signals joking/trolling/roleplay for fun. High flags interpretability."
+    calibration: "Groundedness + epistemic humility. Spots uncertainty, updates beliefs, avoids confident nonsense.",
+    frivolity: "How unserious the answer is (trolling, joking, performative). High = reduce interpretability."
   }
 };
 
