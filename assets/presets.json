@@ -1,0 +1,7 @@
+[
+  { "name": "Default WP", "src": "./assets/presets/WP_0.png", "x": 30, "y": 30, "calibration": 60, "playfulness": 10 },
+  { "name": "Default WE", "src": "./assets/presets/WE_0.png", "x": -30, "y": 30, "calibration": 60, "playfulness": 10 },
+  { "name": "Default KP", "src": "./assets/presets/KP_0.png", "x": 30, "y": -30, "calibration": 60, "playfulness": 10 },
+  { "name": "Default KE", "src": "./assets/presets/KE_0.png", "x": -30, "y": -30, "calibration": 60, "playfulness": 10 },
+  { "name": "x6y11", "src": "./assets/presets/x6y11.png", "x": 6, "y": 11, "calibration": 70, "playfulness": 5 }
+]
