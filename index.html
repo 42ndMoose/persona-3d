@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Persona 3D</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="dot"></div>
+          <div>
+            <div class="title">Persona 3D</div>
+            <div class="subtitle">Essay answers • LLM scoring • Local-first</div>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <button id="btnReset" class="btn btn-ghost" title="Reset session (local only)">Reset</button>
+          <button id="btnExport" class="btn btn-ghost" title="Export session JSON">Export</button>
+          <label class="btn btn-ghost file">
+            Import
+            <input id="fileImport" type="file" accept="application/json" />
+          </label>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel">
+          <div class="card">
+            <div class="card-h">
+              <div class="card-title">Current question</div>
+              <div class="pill" id="pillProgress">0 answered</div>
+            </div>
+
+            <div class="q-meta" id="qMeta"></div>
+            <div class="q-body" id="qBody"></div>
+
+            <div class="row">
+              <button id="btnCopyPrimer" class="btn">Copy primer</button>
+              <button id="btnCopyQuestion" class="btn btn-secondary">Copy this question</button>
+            </div>
+
+            <div class="smallnote">
+              Paste the primer once per session into your LLM chat. Then, for each question, paste the question text and answer in the LLM. Finally, paste the LLM’s JSON output below.
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-h">
+              <div class="card-title">Paste LLM JSON</div>
+              <div class="pill pill-warn" id="pillStatus">Waiting</div>
+            </div>
+
+            <textarea id="jsonIn" spellcheck="false" placeholder='Paste the model output here (must be JSON only).'></textarea>
+
+            <div class="row">
+              <button id="btnParse" class="btn">Parse + save</button>
+              <button id="btnNext" class="btn btn-secondary" title="Skip to next question without saving">Skip</button>
+            </div>
+
+            <div id="parseMsg" class="msg"></div>
+
+            <details class="details">
+              <summary>What if the user missed the point?</summary>
+              <div class="smallnote">
+                Your model can set <code>needs_clarification.is_needed=true</code> and provide a re-explain message plus a re-ask prompt.
+                The site will surface it after parsing.
+              </div>
+            </details>
+          </div>
+
+          <div class="card">
+            <div class="card-h">
+              <div class="card-title">Scores</div>
+              <div class="pill" id="pillQuadrant">Quadrant: —</div>
+            </div>
+
+            <div class="grid2">
+              <div class="kv"><div class="k">Practicality</div><div class="v" id="vPracticality">—</div></div>
+              <div class="kv"><div class="k">Empathy</div><div class="v" id="vEmpathy">—</div></div>
+              <div class="kv"><div class="k">Knowledge</div><div class="v" id="vKnowledge">—</div></div>
+              <div class="kv"><div class="k">Wisdom</div><div class="v" id="vWisdom">—</div></div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="grid2">
+              <div class="kv"><div class="k">Calibration</div><div class="v" id="vCalibration">—</div></div>
+              <div class="kv"><div class="k">Playfulness</div><div class="v" id="vPlayfulness">—</div></div>
+            </div>
+
+            <div class="smallnote">
+              Calibration = groundedness + epistemic humility. Playfulness helps detect unserious / troll answers without punishing creativity.
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-h">
+              <div class="card-title">Answer history</div>
+              <div class="pill" id="pillSaved">Saved: 0</div>
+            </div>
+            <div id="history" class="history"></div>
+          </div>
+        </section>
+
+        <section class="viz">
+          <canvas id="c"></canvas>
+          <div class="viz-overlay">
+            <div class="viz-title">Quadrant plane</div>
+            <div class="viz-sub">
+              x = practicality − empathy<br />
+              y = wisdom − knowledge
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
