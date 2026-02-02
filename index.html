@@ -19,6 +19,11 @@
         </div>
 
         <div class="topbar-actions">
+          <div class="bucket">
+            <div class="bucket-label">Bucket</div>
+            <select id="bucketSelect"></select>
+          </div>
+
           <button id="btnReset" class="btn btn-ghost" title="Reset session (local only)">Reset</button>
           <button id="btnExport" class="btn btn-ghost" title="Export session JSON">Export</button>
           <label class="btn btn-ghost file">
@@ -33,7 +38,7 @@
           <div class="card">
             <div class="card-h">
               <div class="card-title">Current question</div>
-              <div class="pill" id="pillProgress">0 answered</div>
+              <div class="pill" id="pillProgress">0 pts</div>
             </div>
 
             <div class="q-meta" id="qMeta"></div>
@@ -45,7 +50,7 @@
             </div>
 
             <div class="smallnote">
-              Paste the primer once per session into your LLM chat. Then, for each question, paste the question text and answer in the LLM. Finally, paste the LLM’s JSON output below.
+              Paste the primer once per bucket/session into your LLM chat. Then for each question: paste the question prompt, answer in essay form, then paste JSON back here.
             </div>
           </div>
 
@@ -55,7 +60,18 @@
               <div class="pill pill-warn" id="pillStatus">Waiting</div>
             </div>
 
-            <textarea id="jsonIn" spellcheck="false" placeholder='Paste the model output here (must be JSON only).'></textarea>
+            <div class="fieldrow">
+              <label class="field">
+                <div class="fieldlabel">Model label (optional)</div>
+                <input id="modelLabel" type="text" placeholder='e.g. "GPT-5.2 Thinking"' />
+              </label>
+              <label class="field">
+                <div class="fieldlabel">Save to bucket</div>
+                <select id="bucketSelectInline"></select>
+              </label>
+            </div>
+
+            <textarea id="jsonIn" spellcheck="false" placeholder='Paste the model output here (JSON only).'></textarea>
 
             <div class="row">
               <button id="btnParse" class="btn">Parse + save</button>
@@ -65,18 +81,28 @@
             <div id="parseMsg" class="msg"></div>
 
             <details class="details">
-              <summary>What if the user missed the point?</summary>
+              <summary>Clarification support</summary>
               <div class="smallnote">
-                Your model can set <code>needs_clarification.is_needed=true</code> and provide a re-explain message plus a re-ask prompt.
-                The site will surface it after parsing.
+                The model can set <code>needs_clarification.is_needed=true</code>. If so, the site will show the re-explain text and a re-ask prompt.
               </div>
+              <div id="clarifyBox" class="clarify"></div>
             </details>
           </div>
 
           <div class="card">
             <div class="card-h">
-              <div class="card-title">Scores</div>
+              <div class="card-title">Progress</div>
               <div class="pill" id="pillQuadrant">Quadrant: —</div>
+            </div>
+
+            <div class="progress">
+              <div class="progressbar">
+                <div class="progressfill" id="progressFill"></div>
+              </div>
+              <div class="progressmeta">
+                <div><span class="muted">Points:</span> <span id="ptsNow">0</span> / 100 <span class="muted">(cap)</span></div>
+                <div><span class="muted">Total earned:</span> <span id="ptsTotal">0</span></div>
+              </div>
             </div>
 
             <div class="grid2">
@@ -94,9 +120,11 @@
             </div>
 
             <div class="smallnote">
-              Calibration = groundedness + epistemic humility. Playfulness helps detect unserious / troll answers without punishing creativity.
+              Calibration = groundedness + epistemic humility. Playfulness flags unserious answers without punishing creativity.
             </div>
           </div>
+
+          <div id="personaCardMount"></div>
 
           <div class="card">
             <div class="card-h">
@@ -109,11 +137,28 @@
 
         <section class="viz">
           <canvas id="c"></canvas>
+
+          <div class="viz-top">
+            <div class="qframe">
+              <div class="qimgwrap">
+                <img id="qImg" alt="" />
+                <div id="qImgPlaceholder" class="qimgph">No image yet</div>
+              </div>
+              <div class="qprint">
+                <div class="qprintTitle" id="qPrintTitle">—</div>
+                <div class="qprintBody" id="qPrintBody">—</div>
+              </div>
+            </div>
+          </div>
+
           <div class="viz-overlay">
             <div class="viz-title">Quadrant plane</div>
             <div class="viz-sub">
               x = practicality − empathy<br />
               y = wisdom − knowledge
+            </div>
+            <div class="viz-sub">
+              Drag to rotate. Release for inertia.
             </div>
           </div>
         </section>
@@ -128,6 +173,9 @@
         }
       }
     </script>
+
+    <!-- QR generator (summary only) -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 
     <script type="module" src="./main.js"></script>
   </body>
