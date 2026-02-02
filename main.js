@@ -1,23 +1,22 @@
 import { QUESTIONS } from "./questions.js";
 import { buildPrimerPrompt, buildQuestionPrompt } from "./prompts.js";
 import { loadSession, saveSession, clearSession } from "./store.js";
-import { loadPresets, pickNearestPreset } from "./presets.js";
 import {
-  normalizeBucket,
   validateAndMigrateModelJson,
   stableHashForDuplicate,
-  computeAggregateForBucket,
-  pickNextQuestion
+  answersForTarget,
+  computeAggregate,
+  deriveQuadrant,
+  pickNextQuestion,
+  shouldAutoCreatePersonaFromDraft,
+  newId
 } from "./scoring.js";
 import { makeViz } from "./three_viz.js";
-import { renderPersonaCard } from "./persona_card.js";
+import { mountPersonaCards } from "./persona_card.js";
 
 const el = (id) => document.getElementById(id);
 
 const ui = {
-  bucketSelect: el("bucketSelect"),
-  bucketSelectInline: el("bucketSelectInline"),
-
   qMeta: el("qMeta"),
   qBody: el("qBody"),
   qPrintTitle: el("qPrintTitle"),
@@ -32,9 +31,12 @@ const ui = {
 
   pillStatus: el("pillStatus"),
   pillSaved: el("pillSaved"),
-  pillProgress: el("pillProgress"),
+  pillMode: el("pillMode"),
   pillQuadrant: el("pillQuadrant"),
 
+  progressCard: el("progressCard"),
+  progressPlaceholder: el("progressPlaceholder"),
+  progressInner: el("progressInner"),
   progressFill: el("progressFill"),
   ptsNow: el("ptsNow"),
   ptsTotal: el("ptsTotal"),
@@ -44,10 +46,14 @@ const ui = {
   vKnowledge: el("vKnowledge"),
   vWisdom: el("vWisdom"),
   vCalibration: el("vCalibration"),
-  vPlayfulness: el("vPlayfulness"),
+  vFrivolity: el("vFrivolity"),
 
+  historyCard: el("historyCard"),
+  historyPlaceholder: el("historyPlaceholder"),
   history: el("history"),
-  personaCardMount: el("personaCardMount"),
+
+  personaLayer: el("personaLayer"),
+  vizRoot: el("vizRoot"),
 
   btnCopyPrimer: el("btnCopyPrimer"),
   btnCopyQuestion: el("btnCopyQuestion"),
@@ -59,30 +65,21 @@ const ui = {
 };
 
 let session = loadSession();
-let presets = await loadPresets();
 
-let activeBucket = "general";
-ensureBucketOptions();
-
-let current = pickNextQuestion(QUESTIONS, session, activeBucket);
+// default persona positions store
+if(!session.ui.persona_positions) session.ui.persona_positions = {};
 
 const viz = makeViz(el("c"));
 
+let selectedPersonaId = session.selected_persona_id || null;
+
+// current target is selected persona, else draft (null)
+function currentTargetId(){ return selectedPersonaId; }
+function targetAnswers(){ return answersForTarget(session, currentTargetId()); }
+
+let currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+
 renderAll();
-
-ui.bucketSelect.addEventListener("change", () => {
-  activeBucket = normalizeBucket(ui.bucketSelect.value);
-  syncBucketSelectors();
-  current = pickNextQuestion(QUESTIONS, session, activeBucket);
-  renderAll();
-});
-
-ui.bucketSelectInline.addEventListener("change", () => {
-  activeBucket = normalizeBucket(ui.bucketSelectInline.value);
-  syncBucketSelectors();
-  current = pickNextQuestion(QUESTIONS, session, activeBucket);
-  renderAll();
-});
 
 ui.btnCopyPrimer.addEventListener("click", async () => {
   await copyText(buildPrimerPrompt());
@@ -90,8 +87,8 @@ ui.btnCopyPrimer.addEventListener("click", async () => {
 });
 
 ui.btnCopyQuestion.addEventListener("click", async () => {
-  await copyText(buildQuestionPrompt(current));
-  toastOk(`Question ${current.id} copied.`);
+  await copyText(buildQuestionPrompt(currentQuestion));
+  toastOk(`Question ${currentQuestion.id} copied.`);
 });
 
 ui.btnParse.addEventListener("click", () => {
@@ -102,9 +99,6 @@ ui.btnParse.addEventListener("click", () => {
     toastBad("Paste JSON first.");
     return;
   }
-
-  const bucket = normalizeBucket(ui.bucketSelectInline.value || activeBucket);
-  const modelLabel = (ui.modelLabel.value || "").trim();
 
   let obj;
   try{
@@ -122,17 +116,26 @@ ui.btnParse.addEventListener("click", () => {
 
   const migrated = v.migrated;
 
-  // enforce qid alignment warning
-  if(migrated.qid !== current.id){
-    toastBad(`Warning: JSON qid=${migrated.qid} but current question is ${current.id}. Saving anyway.`);
+  if(migrated.qid !== currentQuestion.id){
+    // warn but allow
+    toastBad(`Warning: JSON qid=${migrated.qid} but current question is ${currentQuestion.id}. Saving anyway.`);
   }
 
-  // attach snapshot of question to make exports portable
-  const qSnap = QUESTIONS.find(q => q.id === migrated.qid) || current;
+  const qSnap = QUESTIONS.find(q => q.id === migrated.qid) || currentQuestion;
+
+  const personaId = currentTargetId(); // null means draft
+  const dupHash = stableHashForDuplicate(migrated, personaId);
+
+  const exists = (session.answers || []).some(a => a.dup_hash === dupHash && (a.persona_id || null) === personaId);
+  if(exists){
+    toastBad(`Duplicate rejected. (hash ${dupHash})`);
+    return;
+  }
+
   const record = {
     ...migrated,
-    bucket,
-    model_label: modelLabel,
+    persona_id: personaId,
+    model_label: (ui.modelLabel.value || "").trim(),
     question: {
       id: qSnap.id,
       title: qSnap.title,
@@ -140,25 +143,14 @@ ui.btnParse.addEventListener("click", () => {
       scenario: qSnap.scenario,
       image: qSnap.image || null
     },
-    saved_at: new Date().toISOString()
+    saved_at: new Date().toISOString(),
+    dup_hash: dupHash
   };
 
-  // duplicate detection
-  const dupHash = stableHashForDuplicate(migrated, bucket);
-  record.dup_hash = dupHash;
-
-  const existing = (session.answers || []).some(a => a.dup_hash === dupHash && normalizeBucket(a.bucket) === bucket);
-  if(existing){
-    toastBad(`Duplicate rejected. (hash ${dupHash})`);
-    return;
-  }
-
-  // save
   session.answers.push(record);
   session.last_qid = record.qid;
-  saveSession(session);
 
-  // always clear on success to avoid duplicate confusion
+  // clear input on success
   ui.jsonIn.value = "";
 
   // show clarification if needed
@@ -168,25 +160,61 @@ ui.btnParse.addEventListener("click", () => {
       `Why: ${re.why}\n\nRe-explain:\n${re.re_explain}\n\nRe-ask prompt:\n${re.re_ask_prompt}`;
   }
 
-  // next
-  current = pickNextQuestion(QUESTIONS, session, activeBucket);
+  // if draft hit 100, auto-create persona from all draft answers
+  if(personaId === null){
+    const draftAgg = computeAggregate(answersForTarget(session, null));
+    if(shouldAutoCreatePersonaFromDraft(draftAgg)){
+      const pid = newId("persona");
+      const newPersona = {
+        id: pid,
+        created_at: new Date().toISOString(),
+        name: "Unnamed",
+        avatar: null,
+        overview: null,
+        ui: { expanded: false }
+      };
+      session.personas.push(newPersona);
+
+      // assign all draft answers to this new persona
+      for(const a of session.answers){
+        if((a.persona_id || null) === null){
+          a.persona_id = pid;
+        }
+      }
+
+      // auto select the new persona
+      selectedPersonaId = pid;
+      session.selected_persona_id = pid;
+
+      // give it a default position on the right, stacked
+      const idx = session.personas.length - 1;
+      session.ui.persona_positions[pid] = { x: 24, y: 180 + idx * 30 };
+
+      toastOk("Persona created from draft.");
+    }
+  }
+
+  saveSession(session);
+
+  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
   renderAll();
   toastOk(`Saved. hash ${dupHash}`);
 });
 
 ui.btnNext.addEventListener("click", () => {
-  current = pickNextQuestion(QUESTIONS, session, activeBucket);
+  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
   renderAll();
   toastOk("Skipped.");
 });
 
 ui.btnReset.addEventListener("click", () => {
-  if(!confirm("Reset local session? This clears local data for this site.")) return;
+  if(!confirm("Reset local data for this site?")) return;
   clearSession();
   session = loadSession();
-  current = pickNextQuestion(QUESTIONS, session, activeBucket);
+  selectedPersonaId = null;
   ui.jsonIn.value = "";
   ui.modelLabel.value = "";
+  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
   renderAll();
   toastOk("Reset done.");
 });
@@ -213,16 +241,36 @@ ui.fileImport.addEventListener("change", async (e) => {
     const obj = JSON.parse(text);
     if(!obj || typeof obj !== "object") throw new Error("bad");
 
-    // best-effort normalize + migrate answer records
+    // normalize-ish
     if(!Array.isArray(obj.answers)) obj.answers = [];
-    obj.answers = obj.answers.map(a => migrateImportedRecord(a)).filter(Boolean);
+    if(!Array.isArray(obj.personas)) obj.personas = [];
+    if(!obj.ui || typeof obj.ui !== "object") obj.ui = {};
+    if(!obj.ui.persona_positions || typeof obj.ui.persona_positions !== "object") obj.ui.persona_positions = {};
+
+    // migrate answers to v3 if needed
+    obj.answers = obj.answers.map(a => migrateImportedAnswer(a)).filter(Boolean);
+
+    // ensure persona ids exist
+    const pids = new Set(obj.personas.map(p => p.id));
+    for(const a of obj.answers){
+      const pid = a.persona_id || null;
+      if(pid !== null && !pids.has(pid)){
+        // orphaned, move to draft
+        a.persona_id = null;
+      }
+    }
 
     session = obj;
-    saveSession(session);
 
-    // refresh buckets and selection
-    ensureBucketOptions(true);
-    current = pickNextQuestion(QUESTIONS, session, activeBucket);
+    // keep selection if valid
+    selectedPersonaId = (typeof session.selected_persona_id === "string") ? session.selected_persona_id : null;
+    if(selectedPersonaId && !session.personas.some(p => p.id === selectedPersonaId)){
+      selectedPersonaId = null;
+      session.selected_persona_id = null;
+    }
+
+    saveSession(session);
+    currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
     renderAll();
     toastOk("Imported session.");
   }catch{
@@ -232,100 +280,56 @@ ui.fileImport.addEventListener("change", async (e) => {
   }
 });
 
-function migrateImportedRecord(a){
+function migrateImportedAnswer(a){
+  // Accept wrapped answers from earlier patch versions
   if(!a || typeof a !== "object") return null;
 
-  const bucket = normalizeBucket(a.bucket);
-  const qid = String(a.qid || a.question?.id || "");
-  if(!qid) return null;
-
-  // if it's raw model json record, it might not have bucket/question fields
+  // If it already has schema_version, migrate via validator
   if(a.schema_version){
     const v = validateAndMigrateModelJson(a);
     if(!v.ok) return null;
 
-    const qSnap = QUESTIONS.find(q => q.id === v.migrated.qid) || QUESTIONS[0];
-    const base = {
+    const qid = v.migrated.qid;
+    const qSnap = QUESTIONS.find(q => q.id === qid) || QUESTIONS[0];
+
+    const personaId = (typeof a.persona_id === "string") ? a.persona_id : null;
+
+    const wrapped = {
       ...v.migrated,
-      bucket,
+      persona_id: personaId,
       model_label: (a.model_label || "").trim(),
       question: a.question || {
         id: qSnap.id, title: qSnap.title, role: qSnap.role, scenario: qSnap.scenario, image: qSnap.image || null
       },
       saved_at: a.saved_at || new Date().toISOString()
     };
-    base.dup_hash = a.dup_hash || stableHashForDuplicate(base, bucket);
-    return base;
+    wrapped.dup_hash = a.dup_hash || stableHashForDuplicate(v.migrated, personaId);
+    return wrapped;
   }
 
-  // already a wrapped record
-  a.bucket = bucket;
-  a.dup_hash = a.dup_hash || stableHashForDuplicate(a, bucket);
+  // Otherwise, it is probably already wrapped, keep best-effort
+  a.persona_id = (typeof a.persona_id === "string") ? a.persona_id : null;
+  a.dup_hash = a.dup_hash || stableHashForDuplicate(a, a.persona_id || null);
   return a;
 }
 
-function ensureBucketOptions(fromImport=false){
-  // buckets come from:
-  // - explicit saved answers
-  // - active selection
-  const buckets = new Set(["general"]);
-  for(const ans of (session.answers || [])){
-    buckets.add(normalizeBucket(ans.bucket));
-  }
-  // also include current selection
-  buckets.add(normalizeBucket(activeBucket));
-
-  const list = [...buckets].sort((a,b)=>a.localeCompare(b));
-
-  ui.bucketSelect.innerHTML = "";
-  ui.bucketSelectInline.innerHTML = "";
-  for(const b of list){
-    const o1 = document.createElement("option");
-    o1.value = b;
-    o1.textContent = b;
-    ui.bucketSelect.appendChild(o1);
-
-    const o2 = document.createElement("option");
-    o2.value = b;
-    o2.textContent = b;
-    ui.bucketSelectInline.appendChild(o2);
-  }
-
-  // keep activeBucket valid
-  if(!buckets.has(activeBucket)) activeBucket = "general";
-  syncBucketSelectors();
-
-  if(fromImport){
-    // if import introduced new buckets, stay on general unless current active exists
-    // (no forced switch)
-  }
-}
-
-function syncBucketSelectors(){
-  ui.bucketSelect.value = activeBucket;
-  ui.bucketSelectInline.value = activeBucket;
-}
-
 function renderAll(){
-  ensureBucketOptions();
   renderQuestion();
-  renderScoresAndProgress();
-  renderPersonaCardUI();
-  renderHistory();
   renderViz();
+  renderPersonaCards();
+  renderLeftPanel();
 }
 
 function renderQuestion(){
   ui.qMeta.textContent =
-    `${current.id} • ${current.title}\nRole: ${current.role}\nTags: ${(current.tags || []).join(", ")}`;
+    `${currentQuestion.id} • ${currentQuestion.title}\nRole: ${currentQuestion.role}\nTags: ${(currentQuestion.tags || []).join(", ")}`;
 
-  ui.qBody.textContent = current.scenario;
-
-  ui.qPrintTitle.textContent = `${current.id} • ${current.title}`;
-  ui.qPrintBody.textContent = current.scenario;
+  ui.qBody.textContent = currentQuestion.scenario;
+  ui.qPrintTitle.textContent = `${currentQuestion.id} • ${currentQuestion.title}`;
+  ui.qPrintBody.textContent = currentQuestion.scenario;
 
   // image
-  const src = current.image || "";
+  const src = currentQuestion.image || "";
   if(src){
     ui.qImg.onload = () => {
       ui.qImg.style.display = "block";
@@ -341,72 +345,123 @@ function renderQuestion(){
     ui.qImgPlaceholder.style.display = "flex";
   }
 
-  ui.pillStatus.textContent = "Waiting";
-  ui.pillSaved.textContent = `Saved: ${(session.answers || []).filter(a => normalizeBucket(a.bucket) === activeBucket).length}`;
+  // mode pill
+  ui.pillMode.textContent = selectedPersonaId ? "Persona selected" : "Draft";
 }
 
-function renderScoresAndProgress(){
-  const agg = computeAggregateForBucket(session, activeBucket);
+function renderViz(){
+  // pin should follow selected persona agg if selected, else draft agg
+  const agg = computeAggregate(targetAnswers());
+  viz.setQuadrantXY(agg.quadrant.x, agg.quadrant.y);
+}
+
+function renderPersonaCards(){
+  mountPersonaCards({
+    layerEl: ui.personaLayer,
+    session,
+    personas: session.personas || [],
+    selectedId: selectedPersonaId,
+    getAggForPersona: (pid) => computeAggregate(answersForTarget(session, pid)),
+    getPointsForPersona: (pid) => computeAggregate(answersForTarget(session, pid)).points,
+    getAnswersForPersona: (pid) => answersForTarget(session, pid),
+    onSelect: (pid) => {
+      selectedPersonaId = pid;
+      session.selected_persona_id = pid;
+      saveSession(session);
+      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+      renderAll();
+    },
+    onDeselect: () => {
+      selectedPersonaId = null;
+      session.selected_persona_id = null;
+      saveSession(session);
+      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+      renderAll();
+    },
+    onUpdatePersona: (sess, persona, patch, silentPosOnly=false) => {
+      const i = sess.personas.findIndex(x => x.id === persona.id);
+      if(i < 0) return;
+
+      const next = { ...sess.personas[i], ...patch };
+
+      // name lock-in behavior: show display, hide edit
+      // handled in persona_card.js via blur; we just store value here
+      sess.personas[i] = next;
+
+      if(!silentPosOnly){
+        // nothing special
+      }
+
+      saveSession(sess);
+      renderAll();
+    },
+    onRemovePersona: (pid) => {
+      // remove persona and its answers
+      session.answers = session.answers.filter(a => (a.persona_id || null) !== pid);
+      session.personas = session.personas.filter(p => p.id !== pid);
+      delete session.ui.persona_positions[pid];
+
+      if(selectedPersonaId === pid){
+        selectedPersonaId = null;
+        session.selected_persona_id = null;
+      }
+
+      saveSession(session);
+      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+      renderAll();
+    },
+    onCopyText: async (text) => {
+      await copyText(text);
+    }
+  });
+}
+
+function renderLeftPanel(){
+  if(!selectedPersonaId){
+    ui.progressPlaceholder.style.display = "block";
+    ui.progressInner.style.display = "none";
+    ui.historyPlaceholder.style.display = "block";
+    ui.history.style.display = "none";
+
+    ui.pillQuadrant.textContent = "Quadrant: —";
+    ui.pillSaved.textContent = "Saved: 0";
+    return;
+  }
+
+  const answers = answersForTarget(session, selectedPersonaId);
+  const agg = computeAggregate(answers);
+
+  ui.progressPlaceholder.style.display = "none";
+  ui.progressInner.style.display = "block";
+  ui.historyPlaceholder.style.display = "none";
+  ui.history.style.display = "flex";
+
+  ui.pillQuadrant.textContent = `Quadrant: ${agg.quadrant.label}`;
+  ui.progressFill.style.width = `${agg.points.now}%`;
+  ui.ptsNow.textContent = String(agg.points.now);
+  ui.ptsTotal.textContent = String(agg.points.total);
 
   ui.vPracticality.textContent = String(agg.axes.practicality);
   ui.vEmpathy.textContent = String(agg.axes.empathy);
   ui.vKnowledge.textContent = String(agg.axes.knowledge);
   ui.vWisdom.textContent = String(agg.axes.wisdom);
-
   ui.vCalibration.textContent = String(agg.meta.calibration);
-  ui.vPlayfulness.textContent = String(agg.meta.playfulness);
+  ui.vFrivolity.textContent = String(agg.meta.frivolity);
 
-  ui.pillQuadrant.textContent = `Quadrant: ${agg.quadrant.label} (x=${agg.quadrant.x}, y=${agg.quadrant.y})`;
+  ui.pillSaved.textContent = `Saved: ${answers.length}`;
 
-  ui.ptsNow.textContent = String(agg.points.now);
-  ui.ptsTotal.textContent = String(agg.points.total);
-
-  ui.pillProgress.textContent = `${agg.points.total} pts`;
-
-  ui.progressFill.style.width = `${agg.points.now}%`;
-
-  window.__agg = agg;
+  renderHistory(answers);
 }
 
-function renderPersonaCardUI(){
-  const agg = window.__agg || computeAggregateForBucket(session, activeBucket);
-
-  renderPersonaCard({
-    mountEl: ui.personaCardMount,
-    bucket: activeBucket,
-    agg,
-    points: agg.points,
-    session,
-    presets,
-    pickPreset: (presetsArr, target) => pickNearestPreset(presetsArr, target),
-    onSaveSession: (s) => { saveSession(s); },
-    onCopyText: async (text) => {
-      await copyText(text);
-      toastOk("Copied overview prompt.");
-    }
-  });
-}
-
-function renderViz(){
-  const agg = window.__agg || computeAggregateForBucket(session, activeBucket);
-  viz.setQuadrantXY(agg.quadrant.x, agg.quadrant.y);
-}
-
-function renderHistory(){
+function renderHistory(answers){
   ui.history.innerHTML = "";
-  const answers = (session.answers || []).filter(a => normalizeBucket(a.bucket) === activeBucket);
-
-  if(answers.length === 0){
-    ui.history.innerHTML = `<div class="smallnote">No answers saved in this bucket yet.</div>`;
-    return;
-  }
-
   const list = [...answers].reverse();
+
   for(const a of list){
     const div = document.createElement("div");
     div.className = "hitem";
 
-    const title = a.question?.title || QUESTIONS.find(q => q.id === a.qid)?.title || "Unknown";
+    const title = a.question?.title || "Unknown";
     const prof = a.notes?.one_sentence_profile ?? "";
     const flags = a.risk_flags || {};
     const flagStr = [
@@ -428,14 +483,13 @@ function renderHistory(){
         </div>
       </div>
       <div class="hmini">
-        pts: ${escapeHtml(String(pts))} • hash ${escapeHtml(a.dup_hash || "")}
-        <br/>axes: P${a.axes?.practicality ?? "?"} E${a.axes?.empathy ?? "?"} K${a.axes?.knowledge ?? "?"} W${a.axes?.wisdom ?? "?"}
-        • cal ${a.meta?.calibration ?? "?"}
+        points: ${escapeHtml(String(pts))} • hash ${escapeHtml(a.dup_hash || "")}
+        <br/>Practicality ${a.axes?.practicality ?? "?"}, Empathy ${a.axes?.empathy ?? "?"}, Knowledge ${a.axes?.knowledge ?? "?"}, Wisdom ${a.axes?.wisdom ?? "?"}
+        <br/>Calibration ${a.meta?.calibration ?? "?"}, Frivolity ${a.meta?.frivolity ?? "?"}
         ${flagStr ? `<br/>flags: ${escapeHtml(flagStr)}` : ""}
         ${prof ? `<br/>${escapeHtml(prof)}` : ""}
       </div>
     `;
-
     ui.history.appendChild(div);
   }
 }
