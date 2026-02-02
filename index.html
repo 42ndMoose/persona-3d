@@ -19,12 +19,7 @@
         </div>
 
         <div class="topbar-actions">
-          <div class="bucket">
-            <div class="bucket-label">Bucket</div>
-            <select id="bucketSelect"></select>
-          </div>
-
-          <button id="btnReset" class="btn btn-ghost" title="Reset session (local only)">Reset</button>
+          <button id="btnReset" class="btn btn-ghost" title="Reset local data">Reset</button>
           <button id="btnExport" class="btn btn-ghost" title="Export session JSON">Export</button>
           <label class="btn btn-ghost file">
             Import
@@ -38,7 +33,7 @@
           <div class="card">
             <div class="card-h">
               <div class="card-title">Current question</div>
-              <div class="pill" id="pillProgress">0 pts</div>
+              <div class="pill" id="pillMode">Draft</div>
             </div>
 
             <div class="q-meta" id="qMeta"></div>
@@ -50,7 +45,7 @@
             </div>
 
             <div class="smallnote">
-              Paste the primer once per bucket/session into your LLM chat. Then for each question: paste the question prompt, answer in essay form, then paste JSON back here.
+              Paste the primer once per LLM chat. Then for each question: paste the question prompt, answer in essay form, and paste the JSON output back here.
             </div>
           </div>
 
@@ -64,10 +59,6 @@
               <label class="field">
                 <div class="fieldlabel">Model label (optional)</div>
                 <input id="modelLabel" type="text" placeholder='e.g. "GPT-5.2 Thinking"' />
-              </label>
-              <label class="field">
-                <div class="fieldlabel">Save to bucket</div>
-                <select id="bucketSelectInline"></select>
               </label>
             </div>
 
@@ -83,59 +74,66 @@
             <details class="details">
               <summary>Clarification support</summary>
               <div class="smallnote">
-                The model can set <code>needs_clarification.is_needed=true</code>. If so, the site will show the re-explain text and a re-ask prompt.
+                The model can set <code>needs_clarification.is_needed=true</code>. If so, the site shows a re-explain + a re-ask prompt.
               </div>
               <div id="clarifyBox" class="clarify"></div>
             </details>
           </div>
 
-          <div class="card">
+          <div class="card" id="progressCard">
             <div class="card-h">
               <div class="card-title">Progress</div>
               <div class="pill" id="pillQuadrant">Quadrant: —</div>
             </div>
 
-            <div class="progress">
-              <div class="progressbar">
-                <div class="progressfill" id="progressFill"></div>
+            <div id="progressPlaceholder" class="smallnote">
+              Select a persona card to view progress.
+            </div>
+
+            <div id="progressInner" style="display:none">
+              <div class="progress">
+                <div class="progressbar">
+                  <div class="progressfill" id="progressFill"></div>
+                </div>
+                <div class="progressmeta">
+                  <div><span class="muted">Points:</span> <span id="ptsNow">0</span> / 100 <span class="muted">(cap)</span></div>
+                  <div><span class="muted">Total earned:</span> <span id="ptsTotal">0</span></div>
+                </div>
               </div>
-              <div class="progressmeta">
-                <div><span class="muted">Points:</span> <span id="ptsNow">0</span> / 100 <span class="muted">(cap)</span></div>
-                <div><span class="muted">Total earned:</span> <span id="ptsTotal">0</span></div>
+
+              <div class="grid2">
+                <div class="kv"><div class="k">Practicality</div><div class="v" id="vPracticality">—</div></div>
+                <div class="kv"><div class="k">Empathy</div><div class="v" id="vEmpathy">—</div></div>
+                <div class="kv"><div class="k">Knowledge</div><div class="v" id="vKnowledge">—</div></div>
+                <div class="kv"><div class="k">Wisdom</div><div class="v" id="vWisdom">—</div></div>
               </div>
-            </div>
 
-            <div class="grid2">
-              <div class="kv"><div class="k">Practicality</div><div class="v" id="vPracticality">—</div></div>
-              <div class="kv"><div class="k">Empathy</div><div class="v" id="vEmpathy">—</div></div>
-              <div class="kv"><div class="k">Knowledge</div><div class="v" id="vKnowledge">—</div></div>
-              <div class="kv"><div class="k">Wisdom</div><div class="v" id="vWisdom">—</div></div>
-            </div>
+              <div class="divider"></div>
 
-            <div class="divider"></div>
+              <div class="grid2">
+                <div class="kv"><div class="k">Calibration</div><div class="v" id="vCalibration">—</div></div>
+                <div class="kv"><div class="k">Frivolity</div><div class="v" id="vFrivolity">—</div></div>
+              </div>
 
-            <div class="grid2">
-              <div class="kv"><div class="k">Calibration</div><div class="v" id="vCalibration">—</div></div>
-              <div class="kv"><div class="k">Playfulness</div><div class="v" id="vPlayfulness">—</div></div>
-            </div>
-
-            <div class="smallnote">
-              Calibration = groundedness + epistemic humility. Playfulness flags unserious answers without punishing creativity.
+              <div class="smallnote">
+                Calibration = groundedness + epistemic humility. Frivolity flags unserious answers without punishing creativity.
+              </div>
             </div>
           </div>
 
-          <div id="personaCardMount"></div>
-
-          <div class="card">
+          <div class="card" id="historyCard">
             <div class="card-h">
               <div class="card-title">Answer history</div>
               <div class="pill" id="pillSaved">Saved: 0</div>
             </div>
-            <div id="history" class="history"></div>
+            <div id="historyPlaceholder" class="smallnote">
+              Select a persona card to view history.
+            </div>
+            <div id="history" class="history" style="display:none"></div>
           </div>
         </section>
 
-        <section class="viz">
+        <section class="viz" id="vizRoot">
           <canvas id="c"></canvas>
 
           <div class="viz-top">
@@ -157,10 +155,9 @@
               x = practicality − empathy<br />
               y = wisdom − knowledge
             </div>
-            <div class="viz-sub">
-              Drag to rotate. Release for inertia.
-            </div>
           </div>
+
+          <div id="personaLayer"></div>
         </section>
       </main>
     </div>
@@ -173,9 +170,6 @@
         }
       }
     </script>
-
-    <!-- QR generator (summary only) -->
-    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 
     <script type="module" src="./main.js"></script>
   </body>
