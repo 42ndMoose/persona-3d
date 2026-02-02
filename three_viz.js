@@ -6,52 +6,67 @@ export function makeViz(canvas){
 
   const scene = new THREE.Scene();
 
-  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
-  camera.position.set(0, 3.1, 6.2);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 120);
+  camera.position.set(0, 2.35, 5.35);
+  camera.lookAt(0, 0.35, 0);
 
+  // root
   const root = new THREE.Group();
   scene.add(root);
 
   // lights
-  scene.add(new THREE.AmbientLight(0xffffff, 0.40));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.42));
   const key = new THREE.DirectionalLight(0xffffff, 0.85);
   key.position.set(3, 6, 2);
   scene.add(key);
 
-  // plane + grid
-  const planeGeo = new THREE.PlaneGeometry(5.2, 5.2, 1, 1);
+  // plane
+  const planeSize = 5.6;
+  const half = planeSize / 2;
+
+  const planeGeo = new THREE.PlaneGeometry(planeSize, planeSize, 1, 1);
   const planeMat = new THREE.MeshStandardMaterial({
     color: 0x0f1b27,
-    roughness: 0.90,
-    metalness: 0.08,
+    roughness: 0.92,
+    metalness: 0.06,
     transparent: true,
-    opacity: 0.92
+    opacity: 0.92,
+    side: THREE.DoubleSide
   });
   const plane = new THREE.Mesh(planeGeo, planeMat);
   plane.rotation.x = -Math.PI / 2;
   plane.position.y = 0;
   root.add(plane);
 
-  const grid = new THREE.GridHelper(5.2, 26, 0x67d1ff, 0x1c2a3a);
+  // grid
+  const grid = new THREE.GridHelper(planeSize, 28, 0x67d1ff, 0x1c2a3a);
   grid.position.y = 0.001;
   root.add(grid);
 
   // axis lines
   const axisMat = new THREE.LineBasicMaterial({ color: 0x9bffa3 });
-  root.add(makeLine([-2.6,0.01,0],[2.6,0.01,0],axisMat));
-  root.add(makeLine([0,0.01,-2.6],[0,0.01,2.6],axisMat));
+  root.add(makeLine([-half,0.012,0],[half,0.012,0],axisMat));
+  root.add(makeLine([0,0.012,-half],[0,0.012,half],axisMat));
 
-  // quadrant labels
-  const labels = new THREE.Group();
-  labels.position.y = 0.02;
-  root.add(labels);
+  // quadrant corner labels (ke/kp/we/wp), lifted so they do not clip
+  const cornerY = 0.18;
+  const cornerLabels = new THREE.Group();
+  cornerLabels.position.y = cornerY;
+  root.add(cornerLabels);
 
-  labels.add(makeLabel("WE", -2.2, -2.2));
-  labels.add(makeLabel("WP",  2.2, -2.2));
-  labels.add(makeLabel("KE", -2.2,  2.2));
-  labels.add(makeLabel("KP",  2.2,  2.2));
+  cornerLabels.add(makeSpriteLabel("WE", -half*0.78, -half*0.78));
+  cornerLabels.add(makeSpriteLabel("WP",  half*0.78, -half*0.78));
+  cornerLabels.add(makeSpriteLabel("KE", -half*0.78,  half*0.78));
+  cornerLabels.add(makeSpriteLabel("KP",  half*0.78,  half*0.78));
 
-  // Drop pin marker
+  // side axis labels lying on plane, rotated so the bottom of text faces center
+  const sideY = 0.02;
+  root.add(makeFlatSideLabel("Practicality",  half*0.92,  0, sideY, Math.PI));          // right, face center
+  root.add(makeFlatSideLabel("Empathy",      -half*0.92,  0, sideY, 0));                 // left
+  root.add(makeFlatSideLabel("Wisdom",        0, -half*0.92, sideY, Math.PI/2));          // top (far)
+  root.add(makeFlatSideLabel("Knowledge",     0,  half*0.92, sideY, -Math.PI/2));         // bottom (near)
+
+  // drop pin marker
   const pin = new THREE.Group();
   root.add(pin);
 
@@ -64,12 +79,12 @@ export function makeViz(canvas){
     metalness: 0.2
   });
   const head = new THREE.Mesh(headGeo, headMat);
-  head.position.y = 0.38;
+  head.position.y = 0.42;
   pin.add(head);
 
   const bodyGeo = new THREE.ConeGeometry(0.10, 0.34, 24);
   const body = new THREE.Mesh(bodyGeo, headMat);
-  body.position.y = 0.19;
+  body.position.y = 0.22;
   pin.add(body);
 
   // subtle particles
@@ -77,39 +92,78 @@ export function makeViz(canvas){
   const pGeo = new THREE.BufferGeometry();
   const pos = new Float32Array(pCount * 3);
   for(let i=0;i<pCount;i++){
-    const r = 3.1 * Math.sqrt(Math.random());
+    const r = 3.2 * Math.sqrt(Math.random());
     const a = Math.random() * Math.PI * 2;
     pos[i*3+0] = Math.cos(a) * r;
-    pos[i*3+1] = 0.25 + Math.random() * 1.9;
+    pos[i*3+1] = 0.35 + Math.random() * 2.0;
     pos[i*3+2] = Math.sin(a) * r;
   }
   pGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  const pMat = new THREE.PointsMaterial({ color: 0x67d1ff, size: 0.016, transparent:true, opacity:0.50 });
+  const pMat = new THREE.PointsMaterial({ color: 0x67d1ff, size: 0.016, transparent:true, opacity:0.45 });
   const pts = new THREE.Points(pGeo, pMat);
   root.add(pts);
 
-  // drag rotation with inertia (horizontal only)
-  const rot = { y: 0, vy: 0, dragging: false, lastX: 0 };
-  const baseSpin = 0.12; // rad/sec
+  // drag rotation via plane raycast + inertia
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+
+  const rot = {
+    y: 0,
+    vy: 0,
+    dragging: false,
+    lastX: 0,
+    sideSign: 1,
+    spinDir: 1
+  };
+
+  const baseSpinMag = 0.10; // rad/sec, sign comes from rot.spinDir
+
+  function setNDCFromEvent(e){
+    const r = canvas.getBoundingClientRect();
+    ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+    ndc.y = -(((e.clientY - r.top) / r.height) * 2 - 1);
+  }
+
+  function raycastPlane(e){
+    setNDCFromEvent(e);
+    raycaster.setFromCamera(ndc, camera);
+    const hits = raycaster.intersectObject(plane, false);
+    return hits[0] || null;
+  }
 
   canvas.addEventListener("pointerdown", (e) => {
+    const hit = raycastPlane(e);
+    if(!hit) return;
+
     rot.dragging = true;
     rot.lastX = e.clientX;
+
+    // near side for camera at +Z is z > 0
+    rot.sideSign = (hit.point.z > 0) ? 1 : -1;
+
     canvas.setPointerCapture(e.pointerId);
   });
+
   canvas.addEventListener("pointerup", (e) => {
     rot.dragging = false;
-    canvas.releasePointerCapture(e.pointerId);
+    try{ canvas.releasePointerCapture(e.pointerId); }catch{}
   });
+
   canvas.addEventListener("pointermove", (e) => {
     if(!rot.dragging) return;
     const dx = e.clientX - rot.lastX;
     rot.lastX = e.clientX;
-    rot.vy = dx * 0.008;      // inject velocity
-    rot.y += dx * 0.008;
+
+    const delta = dx * 0.008 * rot.sideSign;
+    rot.vy = delta * 60; // convert to per-second-ish velocity
+    rot.y += delta;
+
+    if(Math.abs(rot.vy) > 0.01){
+      rot.spinDir = Math.sign(rot.vy) || rot.spinDir;
+    }
   });
 
-  // state for pin coordinates
+  // state for pin coords
   const state = { targetX: 0, targetZ: 0 };
 
   function resize(){
@@ -127,19 +181,23 @@ export function makeViz(canvas){
     const dt = Math.min(0.033, (t1 - t0) / 1000);
     t0 = t1;
 
-    // rotation: base spin unless user is holding
     if(!rot.dragging){
-      rot.vy *= Math.pow(0.001, dt); // decay
-      rot.y += (baseSpin * dt) + (rot.vy * dt);
+      // decay inertia
+      rot.vy *= Math.pow(0.001, dt);
+      if(Math.abs(rot.vy) < 0.01){
+        rot.y += rot.spinDir * baseSpinMag * dt;
+      }else{
+        rot.y += rot.vy * dt;
+      }
     }
+
     root.rotation.y = rot.y;
 
     // smooth-follow pin
     pin.position.x += (state.targetX - pin.position.x) * (1 - Math.pow(0.001, dt));
     pin.position.z += (state.targetZ - pin.position.z) * (1 - Math.pow(0.001, dt));
-
-    // pin bob
     pin.position.y = 0.02 + Math.sin(t1 * 0.0022) * 0.02;
+
     pts.rotation.y -= dt * 0.04;
 
     renderer.render(scene, camera);
@@ -151,11 +209,10 @@ export function makeViz(canvas){
 
   return {
     setQuadrantXY(x, y){
-      // x,y in [-100,100] -> plane coords [-2.4,2.4]
       const nx = clamp(x / 100, -1, 1);
       const ny = clamp(y / 100, -1, 1);
-      state.targetX = nx * 2.4;
-      state.targetZ = -ny * 2.4;
+      state.targetX = nx * (half * 0.86);
+      state.targetZ = -ny * (half * 0.86);
     }
   };
 }
@@ -170,9 +227,9 @@ function makeLine(a, b, mat){
   return new THREE.Line(geo, mat);
 }
 
-function makeLabel(text, x, z){
+function makeSpriteLabel(text, x, z){
   const sprite = textSprite(text);
-  sprite.position.set(x, 0.01, z);
+  sprite.position.set(x, 0.0, z);
   sprite.scale.set(0.9, 0.45, 1);
   return sprite;
 }
@@ -184,11 +241,11 @@ function textSprite(text){
   const ctx = canvas.getContext("2d");
 
   ctx.clearRect(0,0,256,128);
-  ctx.fillStyle = "rgba(0,0,0,0.35)";
-  roundRect(ctx, 18, 26, 220, 76, 18);
+  ctx.fillStyle = "rgba(0,0,0,0.30)";
+  roundRect(ctx, 20, 28, 216, 72, 16);
   ctx.fill();
 
-  ctx.font = "bold 56px ui-sans-serif, system-ui, Arial";
+  ctx.font = "900 56px ui-sans-serif, system-ui, Arial";
   ctx.fillStyle = "rgba(207,226,255,0.95)";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -197,10 +254,58 @@ function textSprite(text){
   const tex = new THREE.CanvasTexture(canvas);
   tex.anisotropy = 4;
 
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent:true, depthWrite:false });
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent:true,
+    depthTest: false,
+    depthWrite:false
+  });
+
   const sprite = new THREE.Sprite(mat);
-  sprite.renderOrder = 10;
+  sprite.renderOrder = 50;
   return sprite;
+}
+
+function makeFlatSideLabel(text, x, z, y, yaw){
+  const mesh = textPlane(text);
+  mesh.position.set(x, y, z);
+  mesh.rotation.x = -Math.PI / 2; // lie flat
+  mesh.rotation.z = yaw;          // rotate around up-axis (because it is flat)
+  return mesh;
+}
+
+function textPlane(text){
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 128;
+  const ctx = canvas.getContext("2d");
+
+  ctx.clearRect(0,0,512,128);
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  roundRect(ctx, 18, 18, 476, 92, 18);
+  ctx.fill();
+
+  ctx.font = "900 54px ui-sans-serif, system-ui, Arial";
+  ctx.fillStyle = "rgba(207,226,255,0.92)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 256, 64);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+
+  const geo = new THREE.PlaneGeometry(1.75, 0.42);
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent:true,
+    depthTest:false,
+    depthWrite:false,
+    side: THREE.DoubleSide
+  });
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 60;
+  return mesh;
 }
 
 function roundRect(ctx, x, y, w, h, r){
