@@ -1,9 +1,4 @@
-import { AXES, META, clamp01to100, clampInt, SCHEMA_V1, SCHEMA_V2 } from "./schema.js";
-
-export function normalizeBucket(label){
-  const x = (label || "").trim();
-  return x ? x : "general";
-}
+import { AXES, META, clamp01to100, clampInt, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3 } from "./schema.js";
 
 export function validateAndMigrateModelJson(obj){
   const errs = [];
@@ -11,17 +6,14 @@ export function validateAndMigrateModelJson(obj){
 
   const sv = obj.schema_version;
 
-  if(sv !== SCHEMA_V2 && sv !== SCHEMA_V1){
-    return { ok:false, errs:[`schema_version must be ${SCHEMA_V2} (or legacy ${SCHEMA_V1})`], migrated:null };
+  if(sv !== SCHEMA_V3 && sv !== SCHEMA_V2 && sv !== SCHEMA_V1){
+    return { ok:false, errs:[`schema_version must be ${SCHEMA_V3} (or legacy ${SCHEMA_V2}/${SCHEMA_V1})`], migrated:null };
   }
 
-  // V1 -> V2 migration
   let m = obj;
-  if(sv === SCHEMA_V1){
-    m = migrateV1toV2(obj);
-  }
+  if(sv === SCHEMA_V1) m = migrateV1toV3(obj);
+  if(sv === SCHEMA_V2) m = migrateV2toV3(obj);
 
-  // Required keys
   if(typeof m.qid !== "string") errs.push("qid missing.");
   if(!m.axes || typeof m.axes !== "object") errs.push("axes missing.");
   if(!m.meta || typeof m.meta !== "object") errs.push("meta missing.");
@@ -41,13 +33,11 @@ export function validateAndMigrateModelJson(obj){
     if(v === null) errs.push(`meta.${k} must be 0..100`);
   }
 
-  // confidence keys (required in v2)
   for(const k of [...AXES, "calibration"]){
     const v = clamp01to100(m.confidence[k]);
     if(v === null) errs.push(`confidence.${k} must be 0..100`);
   }
 
-  // effort points
   const pts = clampInt(m.effort.points_awarded, 0, 50);
   if(pts === null) errs.push("effort.points_awarded must be an int 0..50");
   if(typeof m.effort.why !== "string") errs.push("effort.why must be a string");
@@ -55,9 +45,32 @@ export function validateAndMigrateModelJson(obj){
   return { ok: errs.length === 0, errs, migrated: m };
 }
 
-function migrateV1toV2(v1){
-  // default effort points for old records:
-  // estimate from average confidence (rough)
+function migrateV2toV3(v2){
+  return {
+    schema_version: SCHEMA_V3,
+    qid: v2.qid,
+    axes: v2.axes,
+    meta: {
+      calibration: v2.meta?.calibration ?? 50,
+      frivolity: v2.meta?.playfulness ?? v2.meta?.frivolity ?? 0
+    },
+    confidence: {
+      practicality: v2.confidence?.practicality ?? 60,
+      empathy: v2.confidence?.empathy ?? 60,
+      knowledge: v2.confidence?.knowledge ?? 60,
+      wisdom: v2.confidence?.wisdom ?? 60,
+      calibration: v2.confidence?.calibration ?? 60
+    },
+    effort: v2.effort || { points_awarded: 20, why: "Migrated (default effort)." },
+    signals: v2.signals || { key_quotes: [], observations: [] },
+    risk_flags: v2.risk_flags || defaultFlags(),
+    needs_clarification: v2.needs_clarification || defaultClarify(),
+    notes: v2.notes || { one_sentence_profile:"", what_shifted_this_score:"" }
+  };
+}
+
+function migrateV1toV3(v1){
+  // V1 is older and may not have effort/confidence structure. Best-effort.
   const avgConf = avg([
     v1.confidence?.practicality, v1.confidence?.empathy, v1.confidence?.knowledge, v1.confidence?.wisdom, v1.confidence?.calibration
   ].map(x => (Number.isFinite(Number(x)) ? Number(x) : 50)));
@@ -65,10 +78,13 @@ function migrateV1toV2(v1){
   const approxPts = Math.max(10, Math.min(35, Math.round(avgConf / 3)));
 
   return {
-    schema_version: SCHEMA_V2,
+    schema_version: SCHEMA_V3,
     qid: v1.qid,
     axes: v1.axes,
-    meta: v1.meta,
+    meta: {
+      calibration: v1.meta?.calibration ?? 50,
+      frivolity: v1.meta?.playfulness ?? v1.meta?.frivolity ?? 0
+    },
     confidence: {
       practicality: v1.confidence?.practicality ?? 60,
       empathy: v1.confidence?.empathy ?? 60,
@@ -77,11 +93,18 @@ function migrateV1toV2(v1){
       calibration: v1.confidence?.calibration ?? 60
     },
     effort: { points_awarded: approxPts, why: "Migrated from v1 record (approx points)." },
-    signals: v1.signals,
-    risk_flags: v1.risk_flags,
-    needs_clarification: v1.needs_clarification,
-    notes: v1.notes
+    signals: v1.signals || { key_quotes: [], observations: [] },
+    risk_flags: v1.risk_flags || defaultFlags(),
+    needs_clarification: v1.needs_clarification || defaultClarify(),
+    notes: v1.notes || { one_sentence_profile:"", what_shifted_this_score:"" }
   };
+}
+
+function defaultFlags(){
+  return { missed_point:false, incoherent:false, likely_trolling:false, delusion_risk:false, cruelty_risk:false };
+}
+function defaultClarify(){
+  return { is_needed:false, why:"", re_explain:"", re_ask_prompt:"" };
 }
 
 function avg(arr){
@@ -90,10 +113,9 @@ function avg(arr){
   return s / arr.length;
 }
 
-export function stableHashForDuplicate(obj, bucket){
-  // Normalize and hash (FNV-1a)
+export function stableHashForDuplicate(obj, personaId){
   const stable = stableStringify(obj);
-  const text = `${bucket}::${stable}`;
+  const text = `${personaId || "draft"}::${stable}`;
   return fnv1a(text);
 }
 
@@ -119,22 +141,21 @@ function fnv1a(str){
   return ("0000000" + h.toString(16)).slice(-8);
 }
 
-export function computeAggregateForBucket(session, bucket){
-  const b = normalizeBucket(bucket);
-  const answers = (session.answers || []).filter(a => normalizeBucket(a.bucket) === b);
+export function answersForTarget(session, personaId){
+  return (session.answers || []).filter(a => (a.persona_id || null) === (personaId || null));
+}
 
-  // default
+export function computeAggregate(answers){
   const axes = { practicality:50, empathy:50, knowledge:50, wisdom:50 };
-  const meta = { calibration:50, playfulness:0 };
+  const meta = { calibration:50, frivolity:0 };
   const points = computePoints(answers);
 
-  if(answers.length === 0){
+  if(!answers.length){
     return { axes, meta, confidence: emptyConfidence(), quadrant: {x:0,y:0,label:"—"}, points };
   }
 
-  // weighted mean by effort points * confidence
-  const sum = { practicality:0, empathy:0, knowledge:0, wisdom:0, calibration:0, playfulness:0 };
-  const wsum = { practicality:0, empathy:0, knowledge:0, wisdom:0, calibration:0, playfulness:0 };
+  const sum = { practicality:0, empathy:0, knowledge:0, wisdom:0, calibration:0, frivolity:0 };
+  const wsum = { practicality:0, empathy:0, knowledge:0, wisdom:0, calibration:0, frivolity:0 };
 
   for(const a of answers){
     const ax = a.axes || {};
@@ -162,13 +183,13 @@ export function computeAggregateForBucket(session, bucket){
       }
     }
 
-    // playfulness: average (effort-weighted only)
+    // frivolity (effort-weighted only)
     {
-      const v = clamp01to100(m.playfulness);
+      const v = clamp01to100(m.frivolity);
       const w = (effort / 50);
       if(v !== null){
-        sum.playfulness += v * w;
-        wsum.playfulness += w;
+        sum.frivolity += v * w;
+        wsum.frivolity += w;
       }
     }
   }
@@ -177,9 +198,9 @@ export function computeAggregateForBucket(session, bucket){
     axes[k] = Math.round(sum[k] / Math.max(0.0001, wsum[k]));
   }
   meta.calibration = Math.round(sum.calibration / Math.max(0.0001, wsum.calibration));
-  meta.playfulness = Math.round(sum.playfulness / Math.max(0.0001, wsum.playfulness));
+  meta.frivolity = Math.round(sum.frivolity / Math.max(0.0001, wsum.frivolity));
 
-  const confidence = computeBucketConfidence(answers);
+  const confidence = computeTargetConfidence(answers);
   const quadrant = deriveQuadrant(axes);
 
   return { axes, meta, confidence, quadrant, points };
@@ -191,11 +212,9 @@ function computePoints(answers){
   return { now, total };
 }
 
-function computeBucketConfidence(answers){
+function computeTargetConfidence(answers){
   if(!answers.length) return emptyConfidence();
 
-  // map points to confidence fullness: once total >= 100, you're "ready"
-  // Still keep per-axis confidence averaged, but also allow points to lift overall stability.
   const totalPts = answers.reduce((acc, a) => acc + (clampInt(a.effort?.points_awarded, 0, 50) ?? 0), 0);
   const ptsFactor = Math.max(0.4, Math.min(1.0, totalPts / 100));
 
@@ -217,7 +236,6 @@ function computeBucketConfidence(answers){
     calibration: Math.round((sums.calibration / answers.length) * ptsFactor)
   };
 
-  // clamp
   for(const k of Object.keys(base)){
     base[k] = Math.max(0, Math.min(100, base[k]));
   }
@@ -231,18 +249,15 @@ function emptyConfidence(){
 export function deriveQuadrant(axes){
   const x = (axes.practicality - axes.empathy);
   const y = (axes.wisdom - axes.knowledge);
-
-  const qx = x >= 0 ? "P" : "E";
-  const qy = y >= 0 ? "W" : "K";
-  const label = `${qy}${qx}`;
-
+  const qx = x >= 0 ? "Practicality" : "Empathy";
+  const qy = y >= 0 ? "Wisdom" : "Knowledge";
+  const label = `${qy} + ${qx}`;
   return { x, y, label };
 }
 
-export function pickNextQuestion(questions, session, bucket){
-  const b = normalizeBucket(bucket);
-  const answered = new Set((session.answers || []).filter(a => normalizeBucket(a.bucket) === b).map(a => a.qid));
-  const agg = computeAggregateForBucket(session, b);
+export function pickNextQuestion(questions, answers, lastQid){
+  const answered = new Set(answers.map(a => a.qid));
+  const agg = computeAggregate(answers);
   const confidence = agg.confidence;
 
   const axisNeed = [
@@ -270,14 +285,12 @@ export function pickNextQuestion(questions, session, bucket){
     }
 
     let rolePenalty = 0;
-    const last = session.last_qid;
-    if(last){
-      const lastQ = questions.find(x => x.id === last);
+    if(lastQid){
+      const lastQ = questions.find(x => x.id === lastQid);
       if(lastQ && lastQ.role === q.role) rolePenalty = 8;
     }
 
     const fatigueCost = (q.fatigue ?? 2) * 10;
-
     const score = infoGain - fatigueCost - rolePenalty;
 
     if(score > bestScore){
@@ -287,4 +300,12 @@ export function pickNextQuestion(questions, session, bucket){
   }
 
   return best || questions[0];
+}
+
+export function shouldAutoCreatePersonaFromDraft(draftAgg){
+  return draftAgg.points.total >= 100;
+}
+
+export function newId(prefix="p"){
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
 }
