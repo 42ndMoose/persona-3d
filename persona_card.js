@@ -1,16 +1,35 @@
 import { buildOverviewPrompt } from "./prompts.js";
 
-const PRESET_URL = "./assets/avatars/presets.json";
+const PRESET_URL = "./assets/presets.json";
 let PRESETS_CACHE = null;
 
 async function loadPresets(){
   if(PRESETS_CACHE) return PRESETS_CACHE;
+
   try{
     const r = await fetch(PRESET_URL, { cache: "no-store" });
-    if(!r.ok) throw new Error("bad");
+    if(!r.ok) throw new Error("bad fetch");
     const j = await r.json();
-    if(!j || !Array.isArray(j.presets)) throw new Error("bad");
-    PRESETS_CACHE = j.presets;
+
+    // Accept either:
+    // 1) raw array: [ { name, src, x, y, ... }, ... ]
+    // 2) object: { presets: [ ... ] }
+    const arr = Array.isArray(j) ? j : (j && Array.isArray(j.presets) ? j.presets : null);
+    if(!arr) throw new Error("bad json shape");
+
+    // Normalize into the shape our UI expects: { label, src, x, y }
+    // Also map legacy "playfulness" -> "frivolity" if present (optional).
+    PRESETS_CACHE = arr
+      .filter(p => p && typeof p.src === "string")
+      .map(p => ({
+        label: p.label ?? p.name ?? "preset",
+        src: p.src,
+        x: Number(p.x ?? 0),
+        y: Number(p.y ?? 0),
+        calibration: Number(p.calibration ?? 0),
+        frivolity: Number(p.frivolity ?? p.playfulness ?? 0)
+      }));
+
     return PRESETS_CACHE;
   }catch{
     PRESETS_CACHE = [];
