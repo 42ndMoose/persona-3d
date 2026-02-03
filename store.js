@@ -1,4 +1,4 @@
-const KEY = "persona3d.session.v3";
+const KEY = "persona3d.session.v4";
 
 export function loadSession(){
   try{
@@ -25,10 +25,13 @@ export function normalize(session){
 
   if(!Array.isArray(s.answers)) s.answers = [];
   if(!Array.isArray(s.personas)) s.personas = [];
+
   if(!s.ui || typeof s.ui !== "object") s.ui = {};
   if(!s.ui.persona_positions || typeof s.ui.persona_positions !== "object") s.ui.persona_positions = {};
 
   if(typeof s.selected_persona_id !== "string") s.selected_persona_id = null;
+  if(typeof s.working_persona_id !== "string") s.working_persona_id = null;
+
   if(typeof s.last_qid !== "string") s.last_qid = null;
 
   return s;
@@ -40,6 +43,7 @@ function makeEmpty(){
     answers: [],
     personas: [],
     selected_persona_id: null,
+    working_persona_id: null,
     last_qid: null,
     ui: { persona_positions: {} }
   };
