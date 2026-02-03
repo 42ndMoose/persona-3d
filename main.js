@@ -6,9 +6,7 @@ import {
   stableHashForDuplicate,
   answersForTarget,
   computeAggregate,
-  deriveQuadrant,
   pickNextQuestion,
-  shouldAutoCreatePersonaFromDraft,
   newId
 } from "./scoring.js";
 import { makeViz } from "./three_viz.js";
@@ -17,12 +15,15 @@ import { mountPersonaCards } from "./persona_card.js";
 const el = (id) => document.getElementById(id);
 
 const ui = {
+  leftPanel: el("leftPanel"),
+
   qMeta: el("qMeta"),
   qBody: el("qBody"),
   qPrintTitle: el("qPrintTitle"),
   qPrintBody: el("qPrintBody"),
   qImg: el("qImg"),
   qImgPlaceholder: el("qImgPlaceholder"),
+  qFrame: el("qFrame"),
 
   modelLabel: el("modelLabel"),
   jsonIn: el("jsonIn"),
@@ -34,7 +35,6 @@ const ui = {
   pillMode: el("pillMode"),
   pillQuadrant: el("pillQuadrant"),
 
-  progressCard: el("progressCard"),
   progressPlaceholder: el("progressPlaceholder"),
   progressInner: el("progressInner"),
   progressFill: el("progressFill"),
@@ -48,7 +48,6 @@ const ui = {
   vCalibration: el("vCalibration"),
   vFrivolity: el("vFrivolity"),
 
-  historyCard: el("historyCard"),
   historyPlaceholder: el("historyPlaceholder"),
   history: el("history"),
 
@@ -60,26 +59,40 @@ const ui = {
   btnParse: el("btnParse"),
   btnNext: el("btnNext"),
   btnReset: el("btnReset"),
-  btnExport: el("btnExport"),
-  fileImport: el("fileImport")
+
+  btnExportCard: el("btnExportCard"),
+  fileImportCard: el("fileImportCard")
 };
 
 let session = loadSession();
-
-// default persona positions store
 if(!session.ui.persona_positions) session.ui.persona_positions = {};
 
 const viz = makeViz(el("c"));
 
-let selectedPersonaId = session.selected_persona_id || null;
+const COLOR_POOL = [
+  "#67d1ff", "#9bffa3", "#ffd36a", "#ff6b6b",
+  "#b28dff", "#7ff6ff", "#ffa7d1", "#a8ff7f"
+];
 
-// current target is selected persona, else draft (null)
-function currentTargetId(){ return selectedPersonaId; }
-function targetAnswers(){ return answersForTarget(session, currentTargetId()); }
+let selectedPersonaId = session.selected_persona_id || null;
+let workingPersonaId = session.working_persona_id || null;
+
+function currentTargetId(){
+  // If selected, we score into selected.
+  // If none selected, we score into working (created on first save).
+  return selectedPersonaId || workingPersonaId || null;
+}
+
+function targetAnswers(){
+  const tid = currentTargetId();
+  return tid ? answersForTarget(session, tid) : [];
+}
 
 let currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
 
 renderAll();
+
+/* ---------- UI actions ---------- */
 
 ui.btnCopyPrimer.addEventListener("click", async () => {
   await copyText(buildPrimerPrompt());
@@ -116,19 +129,17 @@ ui.btnParse.addEventListener("click", () => {
 
   const migrated = v.migrated;
 
-  if(migrated.qid !== currentQuestion.id){
-    // warn but allow
-    toastBad(`Warning: JSON qid=${migrated.qid} but current question is ${currentQuestion.id}. Saving anyway.`);
-  }
-
   const qSnap = QUESTIONS.find(q => q.id === migrated.qid) || currentQuestion;
 
-  const personaId = currentTargetId(); // null means draft
+  // Ensure a persona target exists
+  const personaId = ensureActivePersonaTarget();
+
   const dupHash = stableHashForDuplicate(migrated, personaId);
 
-  const exists = (session.answers || []).some(a => a.dup_hash === dupHash && (a.persona_id || null) === personaId);
+  // Duplicates are rejected only within the SAME persona.
+  const exists = (session.answers || []).some(a => a.dup_hash === dupHash && a.persona_id === personaId);
   if(exists){
-    toastBad(`Duplicate rejected. (hash ${dupHash})`);
+    toastBad(`Duplicate rejected for this card. (hash ${dupHash})`);
     return;
   }
 
@@ -150,48 +161,16 @@ ui.btnParse.addEventListener("click", () => {
   session.answers.push(record);
   session.last_qid = record.qid;
 
+  // store axes xy snapshot onto persona for preset matching, etc.
+  updatePersonaAxesXY(personaId);
+
   // clear input on success
   ui.jsonIn.value = "";
 
-  // show clarification if needed
   if(record.needs_clarification?.is_needed){
     const re = record.needs_clarification;
     ui.clarifyBox.textContent =
       `Why: ${re.why}\n\nRe-explain:\n${re.re_explain}\n\nRe-ask prompt:\n${re.re_ask_prompt}`;
-  }
-
-  // if draft hit 100, auto-create persona from all draft answers
-  if(personaId === null){
-    const draftAgg = computeAggregate(answersForTarget(session, null));
-    if(shouldAutoCreatePersonaFromDraft(draftAgg)){
-      const pid = newId("persona");
-      const newPersona = {
-        id: pid,
-        created_at: new Date().toISOString(),
-        name: "Unnamed",
-        avatar: null,
-        overview: null,
-        ui: { expanded: false }
-      };
-      session.personas.push(newPersona);
-
-      // assign all draft answers to this new persona
-      for(const a of session.answers){
-        if((a.persona_id || null) === null){
-          a.persona_id = pid;
-        }
-      }
-
-      // auto select the new persona
-      selectedPersonaId = pid;
-      session.selected_persona_id = pid;
-
-      // give it a default position on the right, stacked
-      const idx = session.personas.length - 1;
-      session.ui.persona_positions[pid] = { x: 24, y: 180 + idx * 30 };
-
-      toastOk("Persona created from draft.");
-    }
   }
 
   saveSession(session);
@@ -203,7 +182,9 @@ ui.btnParse.addEventListener("click", () => {
 
 ui.btnNext.addEventListener("click", () => {
   currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
-  renderAll();
+  renderQuestion();
+  // question window reappears when question changes
+  showQuestionFrame(true);
   toastOk("Skipped.");
 });
 
@@ -212,112 +193,218 @@ ui.btnReset.addEventListener("click", () => {
   clearSession();
   session = loadSession();
   selectedPersonaId = null;
+  workingPersonaId = null;
   ui.jsonIn.value = "";
   ui.modelLabel.value = "";
-  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+  currentQuestion = pickNextQuestion(QUESTIONS, [], session.last_qid);
   renderAll();
   toastOk("Reset done.");
 });
 
-ui.btnExport.addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(session, null, 2)], { type:"application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "persona3d-session.json";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  toastOk("Exported session JSON.");
+/* per-card export/import */
+
+ui.btnExportCard.addEventListener("click", () => {
+  const pid = selectedPersonaId || workingPersonaId;
+  if(!pid){
+    toastBad("No card to export yet. Answer one question first.");
+    return;
+  }
+  const pack = exportPersonaCard(pid);
+  downloadJson(pack, `persona-card-${pid}.json`);
+  toastOk("Exported card.");
 });
 
-ui.fileImport.addEventListener("change", async (e) => {
+ui.fileImportCard.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if(!file) return;
-  const text = await file.text();
 
   try{
+    const text = await file.text();
     const obj = JSON.parse(text);
-    if(!obj || typeof obj !== "object") throw new Error("bad");
 
-    // normalize-ish
-    if(!Array.isArray(obj.answers)) obj.answers = [];
-    if(!Array.isArray(obj.personas)) obj.personas = [];
-    if(!obj.ui || typeof obj.ui !== "object") obj.ui = {};
-    if(!obj.ui.persona_positions || typeof obj.ui.persona_positions !== "object") obj.ui.persona_positions = {};
-
-    // migrate answers to v3 if needed
-    obj.answers = obj.answers.map(a => migrateImportedAnswer(a)).filter(Boolean);
-
-    // ensure persona ids exist
-    const pids = new Set(obj.personas.map(p => p.id));
-    for(const a of obj.answers){
-      const pid = a.persona_id || null;
-      if(pid !== null && !pids.has(pid)){
-        // orphaned, move to draft
-        a.persona_id = null;
-      }
-    }
-
-    session = obj;
-
-    // keep selection if valid
-    selectedPersonaId = (typeof session.selected_persona_id === "string") ? session.selected_persona_id : null;
-    if(selectedPersonaId && !session.personas.some(p => p.id === selectedPersonaId)){
-      selectedPersonaId = null;
-      session.selected_persona_id = null;
+    // Accept: persona_card export format, OR older full-session export and extract personas.
+    if(obj && obj.schema_version === "persona3d.persona_export.v1"){
+      importPersonaCard(obj);
+      toastOk("Imported card.");
+    }else if(obj && Array.isArray(obj.personas) && Array.isArray(obj.answers)){
+      // Merge old session export (instead of overwriting)
+      mergeOldSession(obj);
+      toastOk("Imported from older session export.");
+    }else{
+      toastBad("Import failed. Not a recognized card/session JSON.");
+      return;
     }
 
     saveSession(session);
-    currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
     renderAll();
-    toastOk("Imported session.");
   }catch{
-    toastBad("Import failed. Not valid session JSON.");
+    toastBad("Import failed. Not valid JSON.");
   }finally{
-    ui.fileImport.value = "";
+    ui.fileImportCard.value = "";
   }
 });
 
-function migrateImportedAnswer(a){
-  // Accept wrapped answers from earlier patch versions
-  if(!a || typeof a !== "object") return null;
+/* click behind question window hides it + deselects */
+el("c").addEventListener("pointerdown", () => {
+  showQuestionFrame(false);
 
-  // If it already has schema_version, migrate via validator
-  if(a.schema_version){
-    const v = validateAndMigrateModelJson(a);
-    if(!v.ok) return null;
+  // Clicking the plane background means you want to stop inspecting a card and start a new one.
+  // This is the “deselect” you asked for.
+  if(selectedPersonaId !== null){
+    selectedPersonaId = null;
+    session.selected_persona_id = null;
+    // reset working so next save creates a new persona
+    workingPersonaId = null;
+    session.working_persona_id = null;
+    saveSession(session);
+    renderAll();
+  }else{
+    // if already none selected, this prepares a fresh new working persona
+    workingPersonaId = null;
+    session.working_persona_id = null;
+    saveSession(session);
+    renderAll();
+  }
+});
 
-    const qid = v.migrated.qid;
-    const qSnap = QUESTIONS.find(q => q.id === qid) || QUESTIONS[0];
+/* ---------- core helpers ---------- */
 
-    const personaId = (typeof a.persona_id === "string") ? a.persona_id : null;
-
-    const wrapped = {
-      ...v.migrated,
-      persona_id: personaId,
-      model_label: (a.model_label || "").trim(),
-      question: a.question || {
-        id: qSnap.id, title: qSnap.title, role: qSnap.role, scenario: qSnap.scenario, image: qSnap.image || null
-      },
-      saved_at: a.saved_at || new Date().toISOString()
-    };
-    wrapped.dup_hash = a.dup_hash || stableHashForDuplicate(v.migrated, personaId);
-    return wrapped;
+function ensureActivePersonaTarget(){
+  // If selected persona exists, use it.
+  if(selectedPersonaId){
+    return selectedPersonaId;
   }
 
-  // Otherwise, it is probably already wrapped, keep best-effort
-  a.persona_id = (typeof a.persona_id === "string") ? a.persona_id : null;
-  a.dup_hash = a.dup_hash || stableHashForDuplicate(a, a.persona_id || null);
-  return a;
+  // If no selected persona but a working persona exists, use it.
+  if(workingPersonaId && session.personas.some(p => p.id === workingPersonaId)){
+    return workingPersonaId;
+  }
+
+  // Otherwise create a new working persona card right now (first answer case).
+  const pid = newId("persona");
+  const color = pickNextColor();
+
+  const newPersona = {
+    id: pid,
+    created_at: new Date().toISOString(),
+    name: "Unnamed",
+    color,
+    avatar: null,
+    overview: null,
+    axes_xy: { x: 0, y: 0 },
+    ui: { expanded: false }
+  };
+
+  session.personas.push(newPersona);
+
+  // default position stacks
+  const idx = session.personas.length - 1;
+  session.ui.persona_positions[pid] = session.ui.persona_positions[pid] || { x: 24, y: 160 + idx * 34 };
+
+  workingPersonaId = pid;
+  session.working_persona_id = pid;
+
+  return pid;
 }
+
+function updatePersonaAxesXY(pid){
+  const answers = answersForTarget(session, pid);
+  const agg = computeAggregate(answers);
+  const i = session.personas.findIndex(p => p.id === pid);
+  if(i >= 0){
+    session.personas[i] = {
+      ...session.personas[i],
+      axes_xy: { x: agg.quadrant.x, y: agg.quadrant.y }
+    };
+  }
+}
+
+function pickNextColor(){
+  const used = new Set((session.personas || []).map(p => (p.color || "").toLowerCase()));
+  for(const c of COLOR_POOL){
+    if(!used.has(c.toLowerCase())) return c;
+  }
+  // fallback
+  return COLOR_POOL[(session.personas.length || 0) % COLOR_POOL.length];
+}
+
+function exportPersonaCard(pid){
+  const persona = session.personas.find(p => p.id === pid);
+  const answers = session.answers.filter(a => a.persona_id === pid);
+
+  return {
+    schema_version: "persona3d.persona_export.v1",
+    exported_at: new Date().toISOString(),
+    persona,
+    answers
+  };
+}
+
+function importPersonaCard(pack){
+  // Always create a new id so duplicates can coexist.
+  const old = pack.persona;
+  const oldId = old.id;
+  const newPid = newId("persona");
+  const color = old.color || pickNextColor();
+
+  const persona = {
+    ...old,
+    id: newPid,
+    color,
+    ui: { ...(old.ui || {}), expanded: false }
+  };
+
+  // place imported cards in a neat stack
+  const idx = session.personas.length;
+  session.ui.persona_positions[newPid] = { x: 24, y: 160 + idx * 34 };
+
+  session.personas.push(persona);
+
+  // migrate + attach answers
+  for(const a of (pack.answers || [])){
+    const v = validateAndMigrateModelJson(a.schema_version ? a : a); // may already be migrated
+    if(a.schema_version && !v.ok){
+      continue;
+    }
+    const migrated = a.schema_version ? v.migrated : a;
+
+    const record = {
+      ...migrated,
+      persona_id: newPid,
+      saved_at: a.saved_at || new Date().toISOString(),
+      model_label: (a.model_label || "").trim(),
+      question: a.question || null
+    };
+    record.dup_hash = stableHashForDuplicate(record, newPid);
+    session.answers.push(record);
+  }
+
+  updatePersonaAxesXY(newPid);
+}
+
+function mergeOldSession(obj){
+  // Pull each persona out and import as separate card
+  const personas = Array.isArray(obj.personas) ? obj.personas : [];
+  const answers = Array.isArray(obj.answers) ? obj.answers : [];
+
+  for(const p of personas){
+    const pid = p.id;
+    const pack = {
+      schema_version: "persona3d.persona_export.v1",
+      persona: p,
+      answers: answers.filter(a => (a.persona_id || null) === pid)
+    };
+    importPersonaCard(pack);
+  }
+}
+
+/* ---------- render ---------- */
 
 function renderAll(){
   renderQuestion();
-  renderViz();
   renderPersonaCards();
   renderLeftPanel();
+  renderVizPins();
 }
 
 function renderQuestion(){
@@ -328,7 +415,6 @@ function renderQuestion(){
   ui.qPrintTitle.textContent = `${currentQuestion.id} • ${currentQuestion.title}`;
   ui.qPrintBody.textContent = currentQuestion.scenario;
 
-  // image
   const src = currentQuestion.image || "";
   if(src){
     ui.qImg.onload = () => {
@@ -345,14 +431,17 @@ function renderQuestion(){
     ui.qImgPlaceholder.style.display = "flex";
   }
 
-  // mode pill
-  ui.pillMode.textContent = selectedPersonaId ? "Persona selected" : "Draft";
-}
+  // Update mode label
+  if(selectedPersonaId){
+    ui.pillMode.textContent = "Selected card";
+  }else if(workingPersonaId){
+    ui.pillMode.textContent = "Working card";
+  }else{
+    ui.pillMode.textContent = "Working";
+  }
 
-function renderViz(){
-  // pin should follow selected persona agg if selected, else draft agg
-  const agg = computeAggregate(targetAnswers());
-  viz.setQuadrantXY(agg.quadrant.x, agg.quadrant.y);
+  // question window should show when question changes
+  showQuestionFrame(true);
 }
 
 function renderPersonaCards(){
@@ -361,43 +450,33 @@ function renderPersonaCards(){
     session,
     personas: session.personas || [],
     selectedId: selectedPersonaId,
+    workingId: workingPersonaId,
     getAggForPersona: (pid) => computeAggregate(answersForTarget(session, pid)),
     getPointsForPersona: (pid) => computeAggregate(answersForTarget(session, pid)).points,
     getAnswersForPersona: (pid) => answersForTarget(session, pid),
+
     onSelect: (pid) => {
       selectedPersonaId = pid;
       session.selected_persona_id = pid;
+
+      // selecting a card is “inspect mode”, does not change working id
       saveSession(session);
-      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+
+      currentQuestion = pickNextQuestion(QUESTIONS, answersForTarget(session, pid), session.last_qid);
       renderAll();
     },
-    onDeselect: () => {
-      selectedPersonaId = null;
-      session.selected_persona_id = null;
-      saveSession(session);
-      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
-      renderAll();
-    },
+
     onUpdatePersona: (sess, persona, patch, silentPosOnly=false) => {
       const i = sess.personas.findIndex(x => x.id === persona.id);
       if(i < 0) return;
-
       const next = { ...sess.personas[i], ...patch };
-
-      // name lock-in behavior: show display, hide edit
-      // handled in persona_card.js via blur; we just store value here
       sess.personas[i] = next;
-
-      if(!silentPosOnly){
-        // nothing special
-      }
-
       saveSession(sess);
-      renderAll();
+      if(!silentPosOnly) renderAll();
     },
+
     onRemovePersona: (pid) => {
-      // remove persona and its answers
-      session.answers = session.answers.filter(a => (a.persona_id || null) !== pid);
+      session.answers = session.answers.filter(a => a.persona_id !== pid);
       session.personas = session.personas.filter(p => p.id !== pid);
       delete session.ui.persona_positions[pid];
 
@@ -405,11 +484,15 @@ function renderPersonaCards(){
         selectedPersonaId = null;
         session.selected_persona_id = null;
       }
+      if(workingPersonaId === pid){
+        workingPersonaId = null;
+        session.working_persona_id = null;
+      }
 
       saveSession(session);
-      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
       renderAll();
     },
+
     onCopyText: async (text) => {
       await copyText(text);
     }
@@ -417,19 +500,31 @@ function renderPersonaCards(){
 }
 
 function renderLeftPanel(){
-  if(!selectedPersonaId){
+  const pid = selectedPersonaId || workingPersonaId;
+  if(!pid){
+    // show placeholders only if nothing started
     ui.progressPlaceholder.style.display = "block";
     ui.progressInner.style.display = "none";
     ui.historyPlaceholder.style.display = "block";
     ui.history.style.display = "none";
-
     ui.pillQuadrant.textContent = "Quadrant: —";
     ui.pillSaved.textContent = "Saved: 0";
     return;
   }
 
-  const answers = answersForTarget(session, selectedPersonaId);
+  const answers = answersForTarget(session, pid);
   const agg = computeAggregate(answers);
+
+  // show progress/history as soon as at least 1 answer exists
+  if(answers.length === 0){
+    ui.progressPlaceholder.style.display = "block";
+    ui.progressInner.style.display = "none";
+    ui.historyPlaceholder.style.display = "block";
+    ui.history.style.display = "none";
+    ui.pillQuadrant.textContent = "Quadrant: —";
+    ui.pillSaved.textContent = "Saved: 0";
+    return;
+  }
 
   ui.progressPlaceholder.style.display = "none";
   ui.progressInner.style.display = "block";
@@ -494,6 +589,49 @@ function renderHistory(answers){
   }
 }
 
+function renderVizPins(){
+  const pins = [];
+  for(const p of (session.personas || [])){
+    const answers = answersForTarget(session, p.id);
+    if(answers.length === 0) continue;
+    const agg = computeAggregate(answers);
+    pins.push({
+      id: p.id,
+      x: agg.quadrant.x,
+      y: agg.quadrant.y,
+      color: hexToInt(p.color || "#67d1ff"),
+      selected: (p.id === selectedPersonaId) || (selectedPersonaId === null && p.id === workingPersonaId)
+    });
+
+    // keep axes snapshot updated
+    p.axes_xy = { x: agg.quadrant.x, y: agg.quadrant.y };
+  }
+  viz.setPins(pins);
+}
+
+/* question frame visibility */
+function showQuestionFrame(show){
+  if(show){
+    ui.qFrame.classList.remove("hidden");
+  }else{
+    ui.qFrame.classList.add("hidden");
+  }
+}
+
+/* ---------- misc ---------- */
+
+function downloadJson(obj, filename){
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type:"application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function copyText(text){
   try{
     await navigator.clipboard.writeText(text);
@@ -523,4 +661,9 @@ function toastBad(msg){
 
 function escapeHtml(s){
   return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+}
+
+function hexToInt(hex){
+  const h = String(hex || "#67d1ff").replace("#","");
+  return parseInt(h.length === 3 ? h.split("").map(c=>c+c).join("") : h, 16);
 }
