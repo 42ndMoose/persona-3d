@@ -1,3 +1,16 @@
+/*
+ * This file is adapted from the upstream three_viz.js.  It builds the
+ * interactive Three.js visualization for the Persona 3D project.
+ *
+ * Changes in this version:
+ *
+ * 1. The edge trait labels (Practicality, Empathy, Wisdom, Knowledge) are
+ *    positioned just outside the quadrant plane instead of on top of it.
+ *    This prevents overlap with axis lines and ensures the labels wrap
+ *    around the plane in a more natural way.  An offset factor controls
+ *    how far outside the plane each label sits.
+ */
+
 import * as THREE from "three";
 
 export function makeViz(canvas){
@@ -54,13 +67,15 @@ export function makeViz(canvas){
   cornerLabels.add(makeSpriteLabel("KE", -half*0.78,  half*0.78));
   cornerLabels.add(makeSpriteLabel("KP",  half*0.78,  half*0.78));
 
-  // Edge labels: centered on edges, not on axis line.
-  // Readable from both sides by drawing text twice on the texture.
+  // Edge labels: centered on edges, not on axis line.  Use a factor >1 to
+  // push the labels just outside the plane.  The yaw rotations ensure the
+  // text faces outward relative to the center of the plane.
   const sideY = 0.02;
-  root.add(makeFlatEdgeLabel("Practicality",  half*0.92,  0, sideY, Math.PI));     // right edge
-  root.add(makeFlatEdgeLabel("Empathy",      -half*0.92,  0, sideY, 0));          // left edge
-  root.add(makeFlatEdgeLabel("Wisdom",        0, -half*0.92, sideY, Math.PI/2));  // far edge
-  root.add(makeFlatEdgeLabel("Knowledge",     0,  half*0.92, sideY, -Math.PI/2)); // near edge
+  const edgeOffsetFactor = 1.08;
+  root.add(makeFlatEdgeLabel("Practicality",  half*edgeOffsetFactor,  0, sideY, Math.PI));     // right edge
+  root.add(makeFlatEdgeLabel("Empathy",      -half*edgeOffsetFactor,  0, sideY, 0));          // left edge
+  root.add(makeFlatEdgeLabel("Wisdom",        0, -half*edgeOffsetFactor, sideY, Math.PI/2));  // far edge
+  root.add(makeFlatEdgeLabel("Knowledge",     0,  half*edgeOffsetFactor, sideY, -Math.PI/2)); // near edge
 
   // Particles
   const pCount = 260;
