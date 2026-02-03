@@ -73,9 +73,13 @@ body{
   left:14px;
   top:14px;
   right:14px;
-  pointer-events:none;
+  pointer-events:auto;
   display:flex;
   justify-content:center;
+}
+
+.viz-top.hidden{
+  display:none;
 }
 
 .qframe{
@@ -142,6 +146,7 @@ body{
   background:rgba(14,20,30,0.55);
   backdrop-filter: blur(10px);
   border-radius:14px;
+  pointer-events:none;
 }
 .viz-title{font-weight:800; font-size:13px}
 .viz-sub{color:var(--muted); font-size:12px; margin-top:6px; line-height:1.35}
@@ -149,7 +154,7 @@ body{
 #personaLayer{
   position:absolute;
   inset:0;
-  pointer-events:none; /* cards enable pointer events individually */
+  pointer-events:none;
 }
 
 /* Cards */
@@ -353,7 +358,7 @@ textarea{
 /* Floating persona cards */
 .pfloat{
   position:absolute;
-  width: 320px;
+  width: 340px;
   border-radius:16px;
   border:1px solid rgba(255,255,255,0.12);
   background:rgba(14,20,30,0.70);
@@ -373,9 +378,16 @@ textarea{
   align-items:center;
   gap:10px;
   padding:10px;
-  cursor:grab;
 }
-.pbar:active{cursor:grabbing}
+.pdrag{
+  flex:1;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  cursor:grab;
+  min-width:0;
+}
+.pdrag:active{cursor:grabbing}
 
 .pavatar{
   width:52px;
@@ -385,6 +397,7 @@ textarea{
   background:rgba(0,0,0,0.22);
   overflow:hidden;
   flex:0 0 auto;
+  cursor:pointer;
 }
 .pavatar img{
   width:100%;
@@ -407,12 +420,40 @@ textarea{
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
+  cursor:text;
 }
 .pnameEdit{
   display:none;
 }
 .pnameEdit input{
   width:100%;
+}
+
+.pbarRight{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.pchip{
+  font-size:12px;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,0.12);
+  background:rgba(0,0,0,0.22);
+}
+.picon{
+  width:34px;
+  height:34px;
+  display:grid;
+  place-items:center;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.12);
+  background:rgba(0,0,0,0.18);
+  cursor:pointer;
+}
+.picon[disabled]{
+  opacity:0.45;
+  cursor:not-allowed;
 }
 
 .pmini{
@@ -447,27 +488,12 @@ textarea{
 }
 .pfloat.expanded .pexpand{display:block}
 
-.pactions{
-  display:flex;
-  gap:8px;
-  flex-wrap:wrap;
-  margin-top:10px;
-}
-
 .pcloseRow{
   display:flex;
   justify-content:space-between;
   align-items:center;
   gap:10px;
   margin-bottom:10px;
-}
-
-.pchip{
-  font-size:12px;
-  padding:6px 10px;
-  border-radius:999px;
-  border:1px solid rgba(255,255,255,0.12);
-  background:rgba(0,0,0,0.22);
 }
 
 .traits{
@@ -529,3 +555,53 @@ textarea{
 }
 
 code{color:#d7e7ff}
+
+/* Avatar preset popup */
+.apop{
+  position:absolute;
+  z-index:1000;
+  width: 340px;
+  border-radius:14px;
+  border:1px solid rgba(255,255,255,0.14);
+  background:rgba(12,18,26,0.92);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 14px 56px rgba(0,0,0,0.50);
+  padding:10px;
+}
+.apopTitle{
+  font-weight:900;
+  font-size:12px;
+}
+.apopNote{
+  margin-top:6px;
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.35;
+}
+.apopGrid{
+  margin-top:10px;
+  display:grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap:8px;
+}
+.athumb{
+  width:100%;
+  aspect-ratio: 1 / 1;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,0.12);
+  background:rgba(0,0,0,0.18);
+  overflow:hidden;
+  cursor:pointer;
+}
+.athumb img{
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  display:block;
+}
+.apopRow{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-top:10px;
+}
