@@ -71,6 +71,7 @@ export function mountPersonaCards({
     const canExpand = (points.now >= 100);
     const expandTitle = canExpand ? "Expand" : "Locked until Fine-tune reaches 100";
 
+    // Build collapsed card HTML. The "Fine-tuning" chip now shows the total points instead of the capped now/100.
     el.innerHTML = `
       <div class="pbar">
         <div class="pdrag" data-drag="1">
@@ -88,7 +89,7 @@ export function mountPersonaCards({
         </div>
 
         <div class="pbarRight" data-nodrag="1">
-          <div class="pchip">Fine-tune: ${points.now}/100</div>
+          <div class="pchip">Fine-tuning: ${points.total}</div>
           <button class="picon" data-action="toggleExpand" ${canExpand ? "" : "disabled"} title="${escapeAttr(expandTitle)}">▾</button>
           <button class="picon" data-action="remove" title="Remove">✕</button>
         </div>
@@ -111,7 +112,7 @@ export function mountPersonaCards({
 
       <div class="pexpand">
         <div class="pcloseRow">
-          <div class="pchip">Fine-tune: ${points.now}/100 • Total: ${points.total}</div>
+          <div class="pchip">Fine-tuning: ${points.total}</div>
           <div class="row" style="margin:0">
             <button class="btn btn-secondary" data-action="collapse">Collapse</button>
           </div>
@@ -616,7 +617,7 @@ function escapeHtml(s){
   return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 }
 function escapeAttr(s){
-  return String(s).replaceAll("&","&amp;").replaceAll("\"","&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+  return String(s).replaceAll("&","&amp;").replaceAll('"','&quot;').replaceAll("<","&lt;").replaceAll(">","&gt;");
 }
 
 function fallbackAvatar(){
