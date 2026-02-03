@@ -358,7 +358,8 @@ textarea{
 /* Floating persona cards */
 .pfloat{
   position:absolute;
-  width: 340px;
+  /* Increased width to provide more room for the name and drag area */
+  width: 380px;
   border-radius:16px;
   border:1px solid rgba(255,255,255,0.12);
   background:rgba(14,20,30,0.70);
@@ -432,7 +433,8 @@ textarea{
 .pbarRight{
   display:flex;
   align-items:center;
-  gap:8px;
+  /* tighten spacing so icons aren’t pushed too far right */
+  gap:6px;
 }
 .pchip{
   font-size:12px;
@@ -568,10 +570,7 @@ code{color:#d7e7ff}
   box-shadow: 0 14px 56px rgba(0,0,0,0.50);
   padding:10px;
 }
-.apopTitle{
-  font-weight:900;
-  font-size:12px;
-}
+.apopTitle{font-weight:900; font-size:12px;}
 .apopNote{
   margin-top:6px;
   color:var(--muted);
