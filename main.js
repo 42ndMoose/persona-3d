@@ -1,3 +1,16 @@
+/*
+ * This file is based on the upstream Persona 3D main.js.  It wires up the
+ * overall application UI and state management.  Several tweaks were made to
+ * improve the user experience:
+ *
+ * 1. When clicking anywhere on the background of the visualization (outside
+ *    of the question frame or persona cards), the question window is
+ *    automatically hidden.  This allows users to see the plane clearly
+ *    without manually closing the window each time.
+ * 2. The existing behaviour for clicking on the canvas (#c) – which hides
+ *    the question window and deselects the current card – is preserved.
+ */
+
 import { QUESTIONS } from "./questions.js";
 import { buildPrimerPrompt, buildQuestionPrompt } from "./prompts.js";
 import { loadSession, saveSession, clearSession } from "./store.js";
@@ -246,6 +259,7 @@ ui.fileImportCard.addEventListener("change", async (e) => {
 
 /* click behind question window hides it + deselects */
 el("c").addEventListener("pointerdown", () => {
+  // hide question window immediately when clicking the plane
   showQuestionFrame(false);
 
   // Clicking the plane background means you want to stop inspecting a card and start a new one.
@@ -265,6 +279,16 @@ el("c").addEventListener("pointerdown", () => {
     saveSession(session);
     renderAll();
   }
+});
+
+// Additional handler: hide the question frame when the user clicks anywhere on the
+// visualization background (outside of the question window or persona cards).  This
+// allows users to clear the overlay and view the plane without needing to click
+// exactly on the canvas.  We don’t change card selection here, just hide the frame.
+ui.vizRoot.addEventListener("pointerdown", (e) => {
+  // Skip if clicking within the question frame or persona cards
+  if(e.target.closest("#qFrame") || e.target.closest("#personaLayer") || e.target.closest(".pfloat")) return;
+  showQuestionFrame(false);
 });
 
 /* ---------- core helpers ---------- */
