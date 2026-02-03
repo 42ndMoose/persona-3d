@@ -1,0 +1,8 @@
+{
+  "presets": [
+    { "label": "Default blue", "src": "./assets/avatars/preset-blue.png", "x": 60, "y": 20 },
+    { "label": "Default green", "src": "./assets/avatars/preset-green.png", "x": -60, "y": 20 },
+    { "label": "Default amber", "src": "./assets/avatars/preset-amber.png", "x": 60, "y": -20 },
+    { "label": "Default red", "src": "./assets/avatars/preset-red.png", "x": -60, "y": -20 }
+  ]
+}
