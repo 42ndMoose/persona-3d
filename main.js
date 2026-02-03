@@ -1,693 +1,568 @@
-/*
- * This file is based on the upstream Persona 3D main.js.  It wires up the
- * overall application UI and state management.  Several tweaks were made to
- * improve the user experience:
- *
- * 1. When clicking anywhere on the background of the visualization (outside
- *    of the question frame or persona cards), the question window is
- *    automatically hidden.  This allows users to see the plane clearly
- *    without manually closing the window each time.
- * 2. The existing behaviour for clicking on the canvas (#c) – which hides
- *    the question window and deselects the current card – is preserved.
- */
+import { createThreeViz } from "./three_viz.js";
+import { PersonaCard } from "./persona_card.js";
 
-import { QUESTIONS } from "./questions.js";
-import { buildPrimerPrompt, buildQuestionPrompt } from "./prompts.js";
-import { loadSession, saveSession, clearSession } from "./store.js";
-import {
-  validateAndMigrateModelJson,
-  stableHashForDuplicate,
-  answersForTarget,
-  computeAggregate,
-  pickNextQuestion,
-  newId
-} from "./scoring.js";
-import { makeViz } from "./three_viz.js";
-import { mountPersonaCards } from "./persona_card.js";
+const LS_KEY = "persona3d_v4";
 
-const el = (id) => document.getElementById(id);
-
-const ui = {
-  leftPanel: el("leftPanel"),
-
-  qMeta: el("qMeta"),
-  qBody: el("qBody"),
-  qPrintTitle: el("qPrintTitle"),
-  qPrintBody: el("qPrintBody"),
-  qImg: el("qImg"),
-  qImgPlaceholder: el("qImgPlaceholder"),
-  qFrame: el("qFrame"),
-
-  modelLabel: el("modelLabel"),
-  jsonIn: el("jsonIn"),
-  parseMsg: el("parseMsg"),
-  clarifyBox: el("clarifyBox"),
-
-  pillStatus: el("pillStatus"),
-  pillSaved: el("pillSaved"),
-  pillMode: el("pillMode"),
-  pillQuadrant: el("pillQuadrant"),
-
-  progressPlaceholder: el("progressPlaceholder"),
-  progressInner: el("progressInner"),
-  progressFill: el("progressFill"),
-  ptsNow: el("ptsNow"),
-  ptsTotal: el("ptsTotal"),
-
-  vPracticality: el("vPracticality"),
-  vEmpathy: el("vEmpathy"),
-  vKnowledge: el("vKnowledge"),
-  vWisdom: el("vWisdom"),
-  vCalibration: el("vCalibration"),
-  vFrivolity: el("vFrivolity"),
-
-  historyPlaceholder: el("historyPlaceholder"),
-  history: el("history"),
-
-  personaLayer: el("personaLayer"),
-  vizRoot: el("vizRoot"),
-
-  btnCopyPrimer: el("btnCopyPrimer"),
-  btnCopyQuestion: el("btnCopyQuestion"),
-  btnParse: el("btnParse"),
-  btnNext: el("btnNext"),
-  btnReset: el("btnReset"),
-
-  btnExportCard: el("btnExportCard"),
-  fileImportCard: el("fileImportCard")
-};
-
-let session = loadSession();
-if(!session.ui.persona_positions) session.ui.persona_positions = {};
-
-const viz = makeViz(el("c"));
-
-const COLOR_POOL = [
-  "#67d1ff", "#9bffa3", "#ffd36a", "#ff6b6b",
-  "#b28dff", "#7ff6ff", "#ffa7d1", "#a8ff7f"
+const COLORS = [
+  0x55a7ff, 0xff7a55, 0x5dff9a, 0xff55c8, 0xffd955,
+  0xb455ff, 0x55fff7, 0xff5555, 0x86ff55, 0x5591ff
 ];
 
-let selectedPersonaId = session.selected_persona_id || null;
-let workingPersonaId = session.working_persona_id || null;
-
-function currentTargetId(){
-  // If selected, we score into selected.
-  // If none selected, we score into working (created on first save).
-  return selectedPersonaId || workingPersonaId || null;
+function nowIso() {
+  return new Date().toISOString();
 }
 
-function targetAnswers(){
-  const tid = currentTargetId();
-  return tid ? answersForTarget(session, tid) : [];
+function safeParseJson(text) {
+  try { return JSON.parse(text); } catch { return null; }
 }
 
-let currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
-renderAll();
-
-/* ---------- UI actions ---------- */
-
-ui.btnCopyPrimer.addEventListener("click", async () => {
-  await copyText(buildPrimerPrompt());
-  toastOk("Primer copied.");
-});
-
-ui.btnCopyQuestion.addEventListener("click", async () => {
-  await copyText(buildQuestionPrompt(currentQuestion));
-  toastOk(`Question ${currentQuestion.id} copied.`);
-});
-
-ui.btnParse.addEventListener("click", () => {
-  ui.clarifyBox.textContent = "";
-
-  const raw = ui.jsonIn.value.trim();
-  if(!raw){
-    toastBad("Paste JSON first.");
-    return;
-  }
-
-  let obj;
-  try{
-    obj = JSON.parse(raw);
-  }catch{
-    toastBad("Invalid JSON. Make sure the model output is JSON only.");
-    return;
-  }
-
-  const v = validateAndMigrateModelJson(obj);
-  if(!v.ok){
-    toastBad("Schema errors:\n- " + v.errs.join("\n- "));
-    return;
-  }
-
-  const migrated = v.migrated;
-
-  const qSnap = QUESTIONS.find(q => q.id === migrated.qid) || currentQuestion;
-
-  // Ensure a persona target exists
-  const personaId = ensureActivePersonaTarget();
-
-  const dupHash = stableHashForDuplicate(migrated, personaId);
-
-  // Duplicates are rejected only within the SAME persona.
-  const exists = (session.answers || []).some(a => a.dup_hash === dupHash && a.persona_id === personaId);
-  if(exists){
-    toastBad(`Duplicate rejected for this card. (hash ${dupHash})`);
-    return;
-  }
-
-  const record = {
-    ...migrated,
-    persona_id: personaId,
-    model_label: (ui.modelLabel.value || "").trim(),
-    question: {
-      id: qSnap.id,
-      title: qSnap.title,
-      role: qSnap.role,
-      scenario: qSnap.scenario,
-      image: qSnap.image || null
-    },
-    saved_at: new Date().toISOString(),
-    dup_hash: dupHash
-  };
-
-  session.answers.push(record);
-  session.last_qid = record.qid;
-
-  // store axes xy snapshot onto persona for preset matching, etc.
-  updatePersonaAxesXY(personaId);
-
-  // clear input on success
-  ui.jsonIn.value = "";
-
-  if(record.needs_clarification?.is_needed){
-    const re = record.needs_clarification;
-    ui.clarifyBox.textContent =
-      `Why: ${re.why}\n\nRe-explain:\n${re.re_explain}\n\nRe-ask prompt:\n${re.re_ask_prompt}`;
-  }
-
-  saveSession(session);
-
-  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
-  renderAll();
-  toastOk(`Saved. hash ${dupHash}`);
-});
-
-ui.btnNext.addEventListener("click", () => {
-  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
-  renderQuestion();
-  // question window reappears when question changes
-  showQuestionFrame(true);
-  toastOk("Skipped.");
-});
-
-ui.btnReset.addEventListener("click", () => {
-  if(!confirm("Reset local data for this site?")) return;
-  clearSession();
-  session = loadSession();
-  selectedPersonaId = null;
-  workingPersonaId = null;
-  ui.jsonIn.value = "";
-  ui.modelLabel.value = "";
-  currentQuestion = pickNextQuestion(QUESTIONS, [], session.last_qid);
-  renderAll();
-  toastOk("Reset done.");
-});
-
-/* per-card export/import */
-
-ui.btnExportCard.addEventListener("click", () => {
-  const pid = selectedPersonaId || workingPersonaId;
-  if(!pid){
-    toastBad("No card to export yet. Answer one question first.");
-    return;
-  }
-  const pack = exportPersonaCard(pid);
-  downloadJson(pack, `persona-card-${pid}.json`);
-  toastOk("Exported card.");
-});
-
-ui.fileImportCard.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if(!file) return;
-
-  try{
-    const text = await file.text();
-    const obj = JSON.parse(text);
-
-    // Accept: persona_card export format, OR older full-session export and extract personas.
-    if(obj && obj.schema_version === "persona3d.persona_export.v1"){
-      importPersonaCard(obj);
-      toastOk("Imported card.");
-    }else if(obj && Array.isArray(obj.personas) && Array.isArray(obj.answers)){
-      // Merge old session export (instead of overwriting)
-      mergeOldSession(obj);
-      toastOk("Imported from older session export.");
-    }else{
-      toastBad("Import failed. Not a recognized card/session JSON.");
-      return;
-    }
-
-    saveSession(session);
-    renderAll();
-  }catch{
-    toastBad("Import failed. Not valid JSON.");
-  }finally{
-    ui.fileImportCard.value = "";
-  }
-});
-
-/* click behind question window hides it + deselects */
-el("c").addEventListener("pointerdown", () => {
-  // hide question window immediately when clicking the plane
-  showQuestionFrame(false);
-
-  // Clicking the plane background means you want to stop inspecting a card and start a new one.
-  // This is the “deselect” you asked for.
-  if(selectedPersonaId !== null){
-    selectedPersonaId = null;
-    session.selected_persona_id = null;
-    // reset working so next save creates a new persona
-    workingPersonaId = null;
-    session.working_persona_id = null;
-    saveSession(session);
-    renderAll();
-  }else{
-    // if already none selected, this prepares a fresh new working persona
-    workingPersonaId = null;
-    session.working_persona_id = null;
-    saveSession(session);
-    renderAll();
-  }
-});
-
-// Additional handler: hide the question frame when the user clicks anywhere on the
-// visualization background (outside of the question window or persona cards).  This
-// allows users to clear the overlay and view the plane without needing to click
-// exactly on the canvas.  We don’t change card selection here, just hide the frame.
-ui.vizRoot.addEventListener("pointerdown", (e) => {
-  // Skip if clicking within the question frame or persona cards
-  if(e.target.closest("#qFrame") || e.target.closest("#personaLayer") || e.target.closest(".pfloat")) return;
-  showQuestionFrame(false);
-});
-
-/* ---------- core helpers ---------- */
-
-function ensureActivePersonaTarget(){
-  // If selected persona exists, use it.
-  if(selectedPersonaId){
-    return selectedPersonaId;
-  }
-
-  // If no selected persona but a working persona exists, use it.
-  if(workingPersonaId && session.personas.some(p => p.id === workingPersonaId)){
-    return workingPersonaId;
-  }
-
-  // Otherwise create a new working persona card right now (first answer case).
-  const pid = newId("persona");
-  const color = pickNextColor();
-
-  const newPersona = {
-    id: pid,
-    created_at: new Date().toISOString(),
-    name: "Unnamed",
-    color,
-    avatar: null,
-    overview: null,
-    axes_xy: { x: 0, y: 0 },
-    ui: { expanded: false }
-  };
-
-  session.personas.push(newPersona);
-
-  // default position stacks
-  const idx = session.personas.length - 1;
-  session.ui.persona_positions[pid] = session.ui.persona_positions[pid] || { x: 24, y: 160 + idx * 34 };
-
-  workingPersonaId = pid;
-  session.working_persona_id = pid;
-
-  return pid;
+function normalizePreset(p) {
+  // Back-compat: playfulness -> frivolity
+  const out = { ...p };
+  if (out.frivolity == null && out.playfulness != null) out.frivolity = out.playfulness;
+  return out;
 }
 
-function updatePersonaAxesXY(pid){
-  const answers = answersForTarget(session, pid);
-  const agg = computeAggregate(answers);
-  const i = session.personas.findIndex(p => p.id === pid);
-  if(i >= 0){
-    session.personas[i] = {
-      ...session.personas[i],
-      axes_xy: { x: agg.quadrant.x, y: agg.quadrant.y }
-    };
+async function loadPresets() {
+  try {
+    const res = await fetch("./assets/presets.json", { cache: "no-store" });
+    if (!res.ok) return [];
+    const arr = await res.json();
+    return Array.isArray(arr) ? arr.map(normalizePreset) : [];
+  } catch {
+    return [];
   }
 }
 
-function pickNextColor(){
-  const used = new Set((session.personas || []).map(p => (p.color || "").toLowerCase()));
-  for(const c of COLOR_POOL){
-    if(!used.has(c.toLowerCase())) return c;
+function pickPresetAvatar(presets, coords, meta) {
+  if (!presets.length) return "./assets/presets/WP_0.png";
+
+  const cx = coords.x;
+  const cy = coords.y;
+  const cal = meta.calibration ?? 60;
+  const friv = meta.frivolity ?? 10;
+
+  let best = presets[0];
+  let bestD = Infinity;
+
+  for (const pr of presets) {
+    const dx = (pr.x ?? 0) - cx;
+    const dy = (pr.y ?? 0) - cy;
+    const dm = Math.abs((pr.calibration ?? cal) - cal) * 0.35 + Math.abs((pr.frivolity ?? friv) - friv) * 0.20;
+    const d = Math.sqrt(dx * dx + dy * dy) + dm;
+    if (d < bestD) { bestD = d; best = pr; }
   }
-  // fallback
-  return COLOR_POOL[(session.personas.length || 0) % COLOR_POOL.length];
+  return best.src || "./assets/presets/WP_0.png";
 }
 
-function exportPersonaCard(pid){
-  const persona = session.personas.find(p => p.id === pid);
-  const answers = session.answers.filter(a => a.persona_id === pid);
+function computeCoordsFromAxes(axes) {
+  // If you already provide quadrant_position.x/y, we use that.
+  // Otherwise we derive:
+  // x = wisdom - knowledge
+  // y = practicality - empathy
+  const w = axes.wisdom ?? 50;
+  const k = axes.knowledge ?? 50;
+  const p = axes.practicality ?? 50;
+  const e = axes.empathy ?? 50;
+
+  const x = clamp((w - k), -50, 50);
+  const y = clamp((p - e), -50, 50);
+  return { x, y };
+}
+
+function buildHistoryItem(a) {
+  const title = a.question_title || a.question_id || "Answer";
+  const meta = `${new Date(a.timestamp).toLocaleString()} • ${a.modelLabel || "Unspecified model"}`;
+  const body = a.summary || a.raw_excerpt || "";
+  return { title, meta, body };
+}
+
+function loadState() {
+  const raw = localStorage.getItem(LS_KEY);
+  const parsed = raw ? safeParseJson(raw) : null;
+  if (!parsed || typeof parsed !== "object") return null;
+  return parsed;
+}
+
+function saveState(state) {
+  localStorage.setItem(LS_KEY, JSON.stringify(state));
+}
+
+function newPersona({ id, color, modelLabel, presets }) {
+  const coords = { x: 0, y: 0 };
+  const meta = { calibration: 60, frivolity: 10 };
+  const avatarSrc = pickPresetAvatar(presets, coords, meta);
 
   return {
-    schema_version: "persona3d.persona_export.v1",
-    exported_at: new Date().toISOString(),
-    persona,
-    answers
-  };
-}
-
-function importPersonaCard(pack){
-  // Always create a new id so duplicates can coexist.
-  const old = pack.persona;
-  const oldId = old.id;
-  const newPid = newId("persona");
-  const color = old.color || pickNextColor();
-
-  const persona = {
-    ...old,
-    id: newPid,
+    id,
+    name: "Unnamed",
+    modelLabel: modelLabel || "",
     color,
-    ui: { ...(old.ui || {}), expanded: false }
+    coords,
+    axes: { practicality: 50, empathy: 50, knowledge: 50, wisdom: 50 },
+    meta,
+    progress: { total: 0 }, // total points
+    history: [],
+
+    overviewPrimer: "",
+    overviewText: "",
+
+    ui: { x: 400, y: 120, z: 10 }
   };
-
-  // place imported cards in a neat stack
-  const idx = session.personas.length;
-  session.ui.persona_positions[newPid] = { x: 24, y: 160 + idx * 34 };
-
-  session.personas.push(persona);
-
-  // migrate + attach answers
-  for(const a of (pack.answers || [])){
-    const v = validateAndMigrateModelJson(a.schema_version ? a : a); // may already be migrated
-    if(a.schema_version && !v.ok){
-      continue;
-    }
-    const migrated = a.schema_version ? v.migrated : a;
-
-    const record = {
-      ...migrated,
-      persona_id: newPid,
-      saved_at: a.saved_at || new Date().toISOString(),
-      model_label: (a.model_label || "").trim(),
-      question: a.question || null
-    };
-    record.dup_hash = stableHashForDuplicate(record, newPid);
-    session.answers.push(record);
-  }
-
-  updatePersonaAxesXY(newPid);
 }
 
-function mergeOldSession(obj){
-  // Pull each persona out and import as separate card
-  const personas = Array.isArray(obj.personas) ? obj.personas : [];
-  const answers = Array.isArray(obj.answers) ? obj.answers : [];
+function ensureAppState(presets) {
+  const loaded = loadState();
+  if (loaded && loaded.v === 4 && Array.isArray(loaded.personas)) return loaded;
 
-  for(const p of personas){
-    const pid = p.id;
-    const pack = {
-      schema_version: "persona3d.persona_export.v1",
-      persona: p,
-      answers: answers.filter(a => (a.persona_id || null) === pid)
-    };
-    importPersonaCard(pack);
-  }
-}
-
-/* ---------- render ---------- */
-
-function renderAll(){
-  renderQuestion();
-  renderPersonaCards();
-  renderLeftPanel();
-  renderVizPins();
-}
-
-function renderQuestion(){
-  ui.qMeta.textContent =
-    `${currentQuestion.id} • ${currentQuestion.title}\nRole: ${currentQuestion.role}\nTags: ${(currentQuestion.tags || []).join(", ")}`;
-
-  ui.qBody.textContent = currentQuestion.scenario;
-  ui.qPrintTitle.textContent = `${currentQuestion.id} • ${currentQuestion.title}`;
-  ui.qPrintBody.textContent = currentQuestion.scenario;
-
-  const src = currentQuestion.image || "";
-  if(src){
-    ui.qImg.onload = () => {
-      ui.qImg.style.display = "block";
-      ui.qImgPlaceholder.style.display = "none";
-    };
-    ui.qImg.onerror = () => {
-      ui.qImg.style.display = "none";
-      ui.qImgPlaceholder.style.display = "flex";
-    };
-    ui.qImg.src = src;
-  }else{
-    ui.qImg.style.display = "none";
-    ui.qImgPlaceholder.style.display = "flex";
-  }
-
-  // Update mode label
-  if(selectedPersonaId){
-    ui.pillMode.textContent = "Selected card";
-  }else if(workingPersonaId){
-    ui.pillMode.textContent = "Working card";
-  }else{
-    ui.pillMode.textContent = "Working";
-  }
-
-  // question window should show when question changes
-  showQuestionFrame(true);
-}
-
-function renderPersonaCards(){
-  mountPersonaCards({
-    layerEl: ui.personaLayer,
-    session,
-    personas: session.personas || [],
-    selectedId: selectedPersonaId,
-    workingId: workingPersonaId,
-    getAggForPersona: (pid) => computeAggregate(answersForTarget(session, pid)),
-    getPointsForPersona: (pid) => computeAggregate(answersForTarget(session, pid)).points,
-    getAnswersForPersona: (pid) => answersForTarget(session, pid),
-
-    onSelect: (pid) => {
-      selectedPersonaId = pid;
-      session.selected_persona_id = pid;
-
-      // selecting a card is “inspect mode”, does not change working id
-      saveSession(session);
-
-      currentQuestion = pickNextQuestion(QUESTIONS, answersForTarget(session, pid), session.last_qid);
-      renderAll();
+  return {
+    v: 4,
+    nextId: 1,
+    zTop: 20,
+    selectedPersonaId: null,
+    draft: {
+      // draft answers when no persona is selected yet
+      activePersonaId: null
     },
+    personas: [],
+    presetsCacheInfo: { count: presets.length, loadedAt: nowIso() }
+  };
+}
 
-    onUpdatePersona: (sess, persona, patch, silentPosOnly=false) => {
-      const i = sess.personas.findIndex(x => x.id === persona.id);
-      if(i < 0) return;
-      const next = { ...sess.personas[i], ...patch };
-      sess.personas[i] = next;
-      saveSession(sess);
-      if(!silentPosOnly) renderAll();
-    },
+// DOM
+const elJson = document.getElementById("jsonInput");
+const elModelLabel = document.getElementById("modelLabel");
+const elParseBtn = document.getElementById("btnParseSave");
+const elClearBtn = document.getElementById("btnClearInput");
+const elParseStatus = document.getElementById("parseStatus");
 
-    onRemovePersona: (pid) => {
-      session.answers = session.answers.filter(a => a.persona_id !== pid);
-      session.personas = session.personas.filter(p => p.id !== pid);
-      delete session.ui.persona_positions[pid];
+const elProgressPanel = document.getElementById("progressPanel");
+const elHistoryPanel = document.getElementById("historyPanel");
+const elProgressText = document.getElementById("progressText");
+const elProgressFill = document.getElementById("progressFill");
+const elHistoryList = document.getElementById("historyList");
 
-      if(selectedPersonaId === pid){
-        selectedPersonaId = null;
-        session.selected_persona_id = null;
-      }
-      if(workingPersonaId === pid){
-        workingPersonaId = null;
-        session.working_persona_id = null;
-      }
+const elPersonaLayer = document.getElementById("personaLayer");
 
-      saveSession(session);
-      renderAll();
-    },
+const elQuestionWindow = document.getElementById("questionWindow");
+const elQuestionText = document.getElementById("questionText");
+const elQuestionImg = document.getElementById("questionImg");
+const elNoImg = document.getElementById("noImg");
+const elToggleQuestion = document.getElementById("btnToggleQuestion");
 
-    onCopyText: async (text) => {
-      await copyText(text);
-    }
+// Three
+const canvas = document.getElementById("threeCanvas");
+
+let presets = [];
+let state = null;
+let three = null;
+
+const cards = new Map();
+
+function bringToFront(personaId) {
+  const p = state.personas.find(x => x.id === personaId);
+  if (!p) return;
+  state.zTop += 1;
+  p.ui.z = state.zTop;
+  const card = cards.get(personaId);
+  if (card) card.setZ(p.ui.z);
+  saveState(state);
+}
+
+function selectPersona(personaId) {
+  state.selectedPersonaId = personaId;
+
+  for (const [id, card] of cards.entries()) {
+    card.setSelected(id === personaId);
+  }
+
+  renderSidebar();
+  saveState(state);
+}
+
+function deselectPersona() {
+  state.selectedPersonaId = null;
+  for (const [, card] of cards.entries()) card.setSelected(false);
+  renderSidebar();
+  saveState(state);
+}
+
+function removePersona(personaId) {
+  const idx = state.personas.findIndex(p => p.id === personaId);
+  if (idx < 0) return;
+
+  const card = cards.get(personaId);
+  if (card) {
+    card.destroy();
+    cards.delete(personaId);
+  }
+
+  state.personas.splice(idx, 1);
+
+  if (state.selectedPersonaId === personaId) state.selectedPersonaId = null;
+
+  syncThreePins();
+  renderSidebar();
+  saveState(state);
+}
+
+function renamePersona(personaId, name) {
+  const p = state.personas.find(x => x.id === personaId);
+  if (!p) return;
+  p.name = name;
+  const card = cards.get(personaId);
+  if (card) card.update(p);
+  saveState(state);
+}
+
+function toggleExpandPersona(personaId) {
+  const card = cards.get(personaId);
+  if (!card) return;
+  card.setExpanded(!card.expanded);
+}
+
+function ensurePersonaExistsForDraft(modelLabel) {
+  // if no persona selected, we still want progress/history to show after first answer
+  let activeId = state.draft.activePersonaId;
+  let p = activeId ? state.personas.find(x => x.id === activeId) : null;
+
+  if (!p) {
+    const id = state.nextId++;
+    const color = COLORS[(id - 1) % COLORS.length];
+    p = newPersona({ id, color, modelLabel, presets });
+    p.ui.x = 390 + (id * 16);
+    p.ui.y = 120 + (id * 12);
+    p.ui.z = (state.zTop += 1);
+
+    state.personas.push(p);
+    state.draft.activePersonaId = id;
+
+    makeCard(p);
+    syncThreePins();
+  }
+
+  return p;
+}
+
+function makeCard(p) {
+  const card = new PersonaCard({
+    parentEl: document.getElementById("personaLayer"),
+    persona: p,
+    onSelect: (id) => selectPersona(id),
+    onDelete: (id) => removePersona(id),
+    onRename: (id, name) => renamePersona(id, name),
+    onToggleExpand: (id) => toggleExpandPersona(id),
+    bringToFront: (id) => bringToFront(id)
+  });
+
+  cards.set(p.id, card);
+}
+
+function syncThreePins() {
+  if (!three) return;
+  const personas = state.personas.map(p => ({
+    id: p.id,
+    color: p.color,
+    coords: p.coords
+  }));
+  three.setPins(personas);
+}
+
+function renderSidebar() {
+  // if a persona is selected, show its progress/history
+  // if none selected, show the draft persona (the one being built), if any answered exists
+  let p = null;
+
+  if (state.selectedPersonaId != null) {
+    p = state.personas.find(x => x.id === state.selectedPersonaId) || null;
+  } else if (state.draft.activePersonaId != null) {
+    p = state.personas.find(x => x.id === state.draft.activePersonaId) || null;
+  }
+
+  const hasAnyAnswers = p && p.history.length > 0;
+
+  if (!hasAnyAnswers) {
+    elProgressPanel.classList.add("hidden");
+    elHistoryPanel.classList.add("hidden");
+    return;
+  }
+
+  elProgressPanel.classList.remove("hidden");
+  elHistoryPanel.classList.remove("hidden");
+
+  const total = p.progress.total;
+  const cap = 100;
+  const pct = clamp(total / cap, 0, 1) * 100;
+
+  elProgressText.textContent = `${total}/100`;
+  elProgressFill.style.width = `${pct}%`;
+
+  elHistoryList.innerHTML = "";
+  for (let i = p.history.length - 1; i >= 0; i--) {
+    const h = buildHistoryItem(p.history[i]);
+    const div = document.createElement("div");
+    div.className = "history-item";
+    div.innerHTML = `
+      <div class="history-top">
+        <div class="history-title">${escapeHtml(h.title)}</div>
+        <div class="history-meta">${escapeHtml(h.meta)}</div>
+      </div>
+      <div class="history-body">${escapeHtml(h.body)}</div>
+    `;
+    elHistoryList.appendChild(div);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function setQuestionWindowVisible(visible) {
+  elQuestionWindow.classList.toggle("hidden", !visible);
+}
+
+function showQuestion({ text, imgSrc }) {
+  elQuestionText.textContent = text || "";
+  if (imgSrc) {
+    elQuestionImg.src = imgSrc;
+    elQuestionImg.style.display = "block";
+    elNoImg.style.display = "none";
+  } else {
+    elQuestionImg.removeAttribute("src");
+    elQuestionImg.style.display = "none";
+    elNoImg.style.display = "grid";
+  }
+  setQuestionWindowVisible(true);
+}
+
+function initQuestionWindowLogic() {
+  elToggleQuestion.addEventListener("click", () => {
+    const hidden = elQuestionWindow.classList.contains("hidden");
+    setQuestionWindowVisible(hidden);
   });
 }
 
-function renderLeftPanel(){
-  const pid = selectedPersonaId || workingPersonaId;
-  if(!pid){
-    // show placeholders only if nothing started
-    ui.progressPlaceholder.style.display = "block";
-    ui.progressInner.style.display = "none";
-    ui.historyPlaceholder.style.display = "block";
-    ui.history.style.display = "none";
-    ui.pillQuadrant.textContent = "Quadrant: —";
-    ui.pillSaved.textContent = "Saved: 0";
+function initDeselectOnBackground() {
+  // click anywhere on main stage background (but not on cards/sidebar) deselects persona
+  document.getElementById("stage").addEventListener("pointerdown", (e) => {
+    const inSidebar = e.target.closest("#sidebar");
+    const inCard = e.target.closest(".persona-card");
+    const inQuestion = e.target.closest("#questionWindow");
+    if (inSidebar || inCard || inQuestion) return;
+    // if they click background but not the canvas, still deselect
+    deselectPersona();
+  });
+}
+
+function parseAndSave() {
+  const text = elJson.value.trim();
+  const modelLabel = elModelLabel.value.trim();
+
+  if (!text) {
+    elParseStatus.textContent = "Paste JSON first.";
     return;
   }
 
-  const answers = answersForTarget(session, pid);
-  const agg = computeAggregate(answers);
-
-  // show progress/history as soon as at least 1 answer exists
-  if(answers.length === 0){
-    ui.progressPlaceholder.style.display = "block";
-    ui.progressInner.style.display = "none";
-    ui.historyPlaceholder.style.display = "block";
-    ui.history.style.display = "none";
-    ui.pillQuadrant.textContent = "Quadrant: —";
-    ui.pillSaved.textContent = "Saved: 0";
+  const obj = safeParseJson(text);
+  if (!obj) {
+    elParseStatus.textContent = "Invalid JSON.";
     return;
   }
 
-  ui.progressPlaceholder.style.display = "none";
-  ui.progressInner.style.display = "block";
-  ui.historyPlaceholder.style.display = "none";
-  ui.history.style.display = "flex";
+  // You can paste either:
+  // - scoring JSON (with axes + effort.points_awarded)
+  // - overview JSON (with overview_text / overview_primer)
+  //
+  // For now, we treat anything with axes or effort as a scoring entry.
 
-  ui.pillQuadrant.textContent = `Quadrant: ${agg.quadrant.label}`;
-  ui.progressFill.style.width = `${agg.points.now}%`;
-  ui.ptsNow.textContent = String(agg.points.now);
-  ui.ptsTotal.textContent = String(agg.points.total);
+  const hasAxes = !!obj.axes || !!obj.practicality || !!(obj.axis_scores && typeof obj.axis_scores === "object");
+  const hasEffort = obj.effort?.points_awarded != null || obj.effort_points != null;
 
-  ui.vPracticality.textContent = String(agg.axes.practicality);
-  ui.vEmpathy.textContent = String(agg.axes.empathy);
-  ui.vKnowledge.textContent = String(agg.axes.knowledge);
-  ui.vWisdom.textContent = String(agg.axes.wisdom);
-  ui.vCalibration.textContent = String(agg.meta.calibration);
-  ui.vFrivolity.textContent = String(agg.meta.frivolity);
-
-  ui.pillSaved.textContent = `Saved: ${answers.length}`;
-
-  renderHistory(answers);
-}
-
-function renderHistory(answers){
-  ui.history.innerHTML = "";
-  const list = [...answers].reverse();
-
-  for(const a of list){
-    const div = document.createElement("div");
-    div.className = "hitem";
-
-    const title = a.question?.title || "Unknown";
-    const prof = a.notes?.one_sentence_profile ?? "";
-    const flags = a.risk_flags || {};
-    const flagStr = [
-      flags.missed_point ? "missed_point" : null,
-      flags.likely_trolling ? "likely_trolling" : null,
-      flags.delusion_risk ? "delusion_risk" : null,
-      flags.cruelty_risk ? "cruelty_risk" : null
-    ].filter(Boolean).join(", ");
-
-    const modelLine = a.model_label ? `Model: ${escapeHtml(a.model_label)}` : "Model: (unspecified)";
-    const pts = a.effort?.points_awarded ?? "?";
-
-    div.innerHTML = `
-      <div class="hrow">
-        <div class="htitle">${escapeHtml(a.qid)} • ${escapeHtml(title)}</div>
-        <div class="hmeta">
-          ${new Date(a.saved_at || Date.now()).toLocaleString()}
-          <br/>${modelLine}
-        </div>
-      </div>
-      <div class="hmini">
-        points: ${escapeHtml(String(pts))} • hash ${escapeHtml(a.dup_hash || "")}
-        <br/>Practicality ${a.axes?.practicality ?? "?"}, Empathy ${a.axes?.empathy ?? "?"}, Knowledge ${a.axes?.knowledge ?? "?"}, Wisdom ${a.axes?.wisdom ?? "?"}
-        <br/>Calibration ${a.meta?.calibration ?? "?"}, Frivolity ${a.meta?.frivolity ?? "?"}
-        ${flagStr ? `<br/>flags: ${escapeHtml(flagStr)}` : ""}
-        ${prof ? `<br/>${escapeHtml(prof)}` : ""}
-      </div>
-    `;
-    ui.history.appendChild(div);
+  // pick persona target:
+  let p = null;
+  if (state.selectedPersonaId != null) {
+    p = state.personas.find(x => x.id === state.selectedPersonaId) || null;
+  } else {
+    // draft mode
+    p = ensurePersonaExistsForDraft(modelLabel);
   }
-}
 
-function renderVizPins(){
-  const pins = [];
-  for(const p of (session.personas || [])){
-    const answers = answersForTarget(session, p.id);
-    if(answers.length === 0) continue;
-    const agg = computeAggregate(answers);
-    pins.push({
-      id: p.id,
-      x: agg.quadrant.x,
-      y: agg.quadrant.y,
-      color: hexToInt(p.color || "#67d1ff"),
-      selected: (p.id === selectedPersonaId) || (selectedPersonaId === null && p.id === workingPersonaId)
-    });
-
-    // keep axes snapshot updated
-    p.axes_xy = { x: agg.quadrant.x, y: agg.quadrant.y };
+  if (!p) {
+    elParseStatus.textContent = "No persona target found.";
+    return;
   }
-  viz.setPins(pins);
-}
 
-/* question frame visibility */
-function showQuestionFrame(show){
-  if(show){
-    ui.qFrame.classList.remove("hidden");
-  }else{
-    ui.qFrame.classList.add("hidden");
+  // update persona model label if provided
+  if (modelLabel) p.modelLabel = modelLabel;
+
+  if (hasAxes || hasEffort) {
+    const entry = normalizeScoringEntry(obj, modelLabel);
+    p.history.push(entry);
+
+    // progress
+    const pts = clamp(entry.effort_points || 0, 0, 50);
+    p.progress.total += pts;
+
+    // axes/meta
+    if (entry.axes) p.axes = entry.axes;
+    if (entry.meta) p.meta = entry.meta;
+
+    // coords
+    if (entry.quadrant_position && typeof entry.quadrant_position.x === "number" && typeof entry.quadrant_position.y === "number") {
+      p.coords = {
+        x: clamp(entry.quadrant_position.x, -50, 50),
+        y: clamp(entry.quadrant_position.y, -50, 50)
+      };
+    } else if (p.axes) {
+      p.coords = computeCoordsFromAxes(p.axes);
+    }
+
+    // avatar preset pick
+    p.avatarSrc = pickPresetAvatar(presets, p.coords, p.meta);
+
+    // unlock: keep expand button disabled until 100 (handled in card render)
+
+    // update card and pins
+    const card = cards.get(p.id);
+    if (card) card.update(p);
+
+    syncThreePins();
+    renderSidebar();
+
+    // clear input every time, no confusion, no dup panic
+    elJson.value = "";
+
+    elParseStatus.textContent = `Saved. +${pts} points. Total: ${p.progress.total}/100`;
+
+    saveState(state);
+    return;
   }
-}
 
-/* ---------- misc ---------- */
+  // overview payload fallback
+  const primer = obj.overview_primer || obj.primer || "";
+  const overviewText = obj.overview_text || obj.overview || "";
 
-function downloadJson(obj, filename){
-  const blob = new Blob([JSON.stringify(obj, null, 2)], { type:"application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
+  if (primer || overviewText) {
+    if (primer) p.overviewPrimer = typeof primer === "string" ? primer : JSON.stringify(primer, null, 2);
+    if (overviewText) p.overviewText = typeof overviewText === "string" ? overviewText : JSON.stringify(overviewText, null, 2);
 
-async function copyText(text){
-  try{
-    await navigator.clipboard.writeText(text);
-  }catch{
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    ta.remove();
+    const card = cards.get(p.id);
+    if (card) card.update(p);
+
+    elJson.value = "";
+    elParseStatus.textContent = "Saved overview info.";
+    saveState(state);
+    return;
   }
+
+  elParseStatus.textContent = "JSON parsed, but it did not match scoring or overview fields.";
 }
 
-function toastOk(msg){
-  ui.pillStatus.textContent = "OK";
-  ui.pillStatus.className = "pill";
-  ui.parseMsg.className = "msg ok";
-  ui.parseMsg.textContent = msg;
+function normalizeScoringEntry(obj, modelLabel) {
+  // Support multiple shapes, keep it forgiving.
+
+  const axes =
+    obj.axes ||
+    obj.axis_scores ||
+    (obj.practicality != null ? {
+      practicality: obj.practicality,
+      empathy: obj.empathy,
+      knowledge: obj.knowledge,
+      wisdom: obj.wisdom
+    } : null);
+
+  const meta =
+    obj.meta ||
+    obj.meta_axes ||
+    (obj.calibration != null ? {
+      calibration: obj.calibration,
+      frivolity: obj.frivolity ?? obj.playfulness ?? 10
+    } : null);
+
+  const effort =
+    obj.effort?.points_awarded ??
+    obj.effort_points ??
+    obj.effortPoints ??
+    0;
+
+  const entry = {
+    timestamp: nowIso(),
+    modelLabel: modelLabel || "",
+    question_id: obj.question_id || "",
+    question_title: obj.question_title || "",
+    summary: obj.summary || "",
+    raw_excerpt: obj.raw_excerpt || "",
+
+    axes: axes ? {
+      practicality: clamp(axes.practicality ?? 50, 0, 100),
+      empathy: clamp(axes.empathy ?? 50, 0, 100),
+      knowledge: clamp(axes.knowledge ?? 50, 0, 100),
+      wisdom: clamp(axes.wisdom ?? 50, 0, 100)
+    } : null,
+
+    meta: meta ? {
+      calibration: clamp(meta.calibration ?? 60, 0, 100),
+      frivolity: clamp(meta.frivolity ?? meta.playfulness ?? 10, 0, 100)
+    } : { calibration: 60, frivolity: 10 },
+
+    effort_points: clamp(effort, 0, 50),
+    quadrant_position: obj.quadrant_position || obj.quadrant || null
+  };
+
+  return entry;
 }
 
-function toastBad(msg){
-  ui.pillStatus.textContent = "Check";
-  ui.pillStatus.className = "pill pill-warn";
-  ui.parseMsg.className = "msg bad";
-  ui.parseMsg.textContent = msg;
+function initInputButtons() {
+  elParseBtn.addEventListener("click", parseAndSave);
+  elClearBtn.addEventListener("click", () => {
+    elJson.value = "";
+    elParseStatus.textContent = "";
+  });
 }
 
-function escapeHtml(s){
-  return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+async function boot() {
+  presets = await loadPresets();
+  state = ensureAppState(presets);
+
+  // create existing cards
+  for (const p of state.personas) {
+    // ensure avatar with presets
+    if (!p.avatarSrc) p.avatarSrc = pickPresetAvatar(presets, p.coords || { x: 0, y: 0 }, p.meta || { calibration: 60, frivolity: 10 });
+    makeCard(p);
+  }
+
+  // three viz
+  three = createThreeViz(canvas, () => {
+    // hide question window when background is touched
+    setQuestionWindowVisible(false);
+  });
+
+  syncThreePins();
+  initInputButtons();
+  initQuestionWindowLogic();
+  initDeselectOnBackground();
+
+  // click on canvas background should also deselect a persona and hide question
+  canvas.addEventListener("pointerdown", () => {
+    setQuestionWindowVisible(false);
+    deselectPersona();
+  });
+
+  // start with question visible so user knows where to look
+  showQuestion({ text: "Paste LLM JSON to start. Click the 3D plane to hide this window.", imgSrc: "" });
+
+  // restore selected
+  if (state.selectedPersonaId != null) selectPersona(state.selectedPersonaId);
+  else renderSidebar();
+
+  saveState(state);
 }
 
-function hexToInt(hex){
-  const h = String(hex || "#67d1ff").replace("#","");
-  return parseInt(h.length === 3 ? h.split("").map(c=>c+c).join("") : h, 16);
-}
+boot();
