@@ -10,17 +10,14 @@ export function makeViz(canvas){
   camera.position.set(0, 2.35, 5.35);
   camera.lookAt(0, 0.35, 0);
 
-  // root
   const root = new THREE.Group();
   scene.add(root);
 
-  // lights
   scene.add(new THREE.AmbientLight(0xffffff, 0.42));
   const key = new THREE.DirectionalLight(0xffffff, 0.85);
   key.position.set(3, 6, 2);
   scene.add(key);
 
-  // plane
   const planeSize = 5.6;
   const half = planeSize / 2;
 
@@ -38,17 +35,15 @@ export function makeViz(canvas){
   plane.position.y = 0;
   root.add(plane);
 
-  // grid
   const grid = new THREE.GridHelper(planeSize, 28, 0x67d1ff, 0x1c2a3a);
   grid.position.y = 0.001;
   root.add(grid);
 
-  // axis lines
   const axisMat = new THREE.LineBasicMaterial({ color: 0x9bffa3 });
   root.add(makeLine([-half,0.012,0],[half,0.012,0],axisMat));
   root.add(makeLine([0,0.012,-half],[0,0.012,half],axisMat));
 
-  // quadrant corner labels (ke/kp/we/wp), lifted so they do not clip
+  // Corner quadrant labels (WE/WP/KE/KP), lifted so they do not clip
   const cornerY = 0.18;
   const cornerLabels = new THREE.Group();
   cornerLabels.position.y = cornerY;
@@ -59,35 +54,15 @@ export function makeViz(canvas){
   cornerLabels.add(makeSpriteLabel("KE", -half*0.78,  half*0.78));
   cornerLabels.add(makeSpriteLabel("KP",  half*0.78,  half*0.78));
 
-  // side axis labels lying on plane, rotated so the bottom of text faces center
+  // Edge labels: centered on edges, not on axis line.
+  // Readable from both sides by drawing text twice on the texture.
   const sideY = 0.02;
-  root.add(makeFlatSideLabel("Practicality",  half*0.92,  0, sideY, Math.PI));          // right, face center
-  root.add(makeFlatSideLabel("Empathy",      -half*0.92,  0, sideY, 0));                 // left
-  root.add(makeFlatSideLabel("Wisdom",        0, -half*0.92, sideY, Math.PI/2));          // top (far)
-  root.add(makeFlatSideLabel("Knowledge",     0,  half*0.92, sideY, -Math.PI/2));         // bottom (near)
+  root.add(makeFlatEdgeLabel("Practicality",  half*0.92,  0, sideY, Math.PI));     // right edge
+  root.add(makeFlatEdgeLabel("Empathy",      -half*0.92,  0, sideY, 0));          // left edge
+  root.add(makeFlatEdgeLabel("Wisdom",        0, -half*0.92, sideY, Math.PI/2));  // far edge
+  root.add(makeFlatEdgeLabel("Knowledge",     0,  half*0.92, sideY, -Math.PI/2)); // near edge
 
-  // drop pin marker
-  const pin = new THREE.Group();
-  root.add(pin);
-
-  const headGeo = new THREE.SphereGeometry(0.12, 24, 24);
-  const headMat = new THREE.MeshStandardMaterial({
-    color: 0x67d1ff,
-    emissive: 0x103b4a,
-    emissiveIntensity: 1.25,
-    roughness: 0.2,
-    metalness: 0.2
-  });
-  const head = new THREE.Mesh(headGeo, headMat);
-  head.position.y = 0.42;
-  pin.add(head);
-
-  const bodyGeo = new THREE.ConeGeometry(0.10, 0.34, 24);
-  const body = new THREE.Mesh(bodyGeo, headMat);
-  body.position.y = 0.22;
-  pin.add(body);
-
-  // subtle particles
+  // Particles
   const pCount = 260;
   const pGeo = new THREE.BufferGeometry();
   const pos = new Float32Array(pCount * 3);
@@ -103,7 +78,72 @@ export function makeViz(canvas){
   const pts = new THREE.Points(pGeo, pMat);
   root.add(pts);
 
-  // drag rotation via plane raycast + inertia
+  // Pins
+  const pinGroup = new THREE.Group();
+  root.add(pinGroup);
+  const pins = new Map(); // id -> {group, mat}
+
+  function makePin(colorHex){
+    const g = new THREE.Group();
+
+    // Single inverted cone: base up, tip down touching the plane
+    const coneGeo = new THREE.ConeGeometry(0.14, 0.52, 32);
+    coneGeo.translate(0, 0.26, 0); // move so tip is near y=0 after rotation
+    const mat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      emissive: colorHex,
+      emissiveIntensity: 0.55,
+      roughness: 0.25,
+      metalness: 0.18
+    });
+
+    const cone = new THREE.Mesh(coneGeo, mat);
+    // By default cone tip is down in threejs when rotated? Actually cone points up on +Y.
+    // Rotate 180 so tip points down.
+    cone.rotation.x = Math.PI;
+    g.add(cone);
+
+    // Lift slightly so the tip doesn’t z-fight
+    g.position.y = 0.03;
+
+    return { g, mat };
+  }
+
+  function setPins(pinList){
+    // pinList: [{id, x, y, color, selected}]
+    const keep = new Set(pinList.map(p => p.id));
+
+    for(const [id, obj] of pins.entries()){
+      if(!keep.has(id)){
+        pinGroup.remove(obj.g);
+        pins.delete(id);
+      }
+    }
+
+    for(const p of pinList){
+      if(!pins.has(p.id)){
+        const made = makePin(p.color);
+        pins.set(p.id, made);
+        pinGroup.add(made.g);
+      }
+
+      const obj = pins.get(p.id);
+      obj.mat.color.setHex(p.color);
+      obj.mat.emissive.setHex(p.color);
+      obj.mat.emissiveIntensity = p.selected ? 0.95 : 0.55;
+
+      const nx = clamp(p.x / 100, -1, 1);
+      const ny = clamp(p.y / 100, -1, 1);
+
+      obj.g.position.x = nx * (half * 0.86);
+      obj.g.position.z = -ny * (half * 0.86);
+
+      // subtle idle motion
+      obj.g.position.y = 0.03 + Math.sin(performance.now() * 0.002 + hashTo01(p.id) * 10) * 0.01;
+    }
+  }
+
+  // Drag rotation using plane raycast + inertia (kept from previous)
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
 
@@ -116,7 +156,7 @@ export function makeViz(canvas){
     spinDir: 1
   };
 
-  const baseSpinMag = 0.10; // rad/sec, sign comes from rot.spinDir
+  const baseSpinMag = 0.10;
 
   function setNDCFromEvent(e){
     const r = canvas.getBoundingClientRect();
@@ -138,7 +178,6 @@ export function makeViz(canvas){
     rot.dragging = true;
     rot.lastX = e.clientX;
 
-    // near side for camera at +Z is z > 0
     rot.sideSign = (hit.point.z > 0) ? 1 : -1;
 
     canvas.setPointerCapture(e.pointerId);
@@ -155,16 +194,13 @@ export function makeViz(canvas){
     rot.lastX = e.clientX;
 
     const delta = dx * 0.008 * rot.sideSign;
-    rot.vy = delta * 60; // convert to per-second-ish velocity
+    rot.vy = delta * 60;
     rot.y += delta;
 
     if(Math.abs(rot.vy) > 0.01){
       rot.spinDir = Math.sign(rot.vy) || rot.spinDir;
     }
   });
-
-  // state for pin coords
-  const state = { targetX: 0, targetZ: 0 };
 
   function resize(){
     const w = canvas.clientWidth;
@@ -182,7 +218,6 @@ export function makeViz(canvas){
     t0 = t1;
 
     if(!rot.dragging){
-      // decay inertia
       rot.vy *= Math.pow(0.001, dt);
       if(Math.abs(rot.vy) < 0.01){
         rot.y += rot.spinDir * baseSpinMag * dt;
@@ -192,11 +227,6 @@ export function makeViz(canvas){
     }
 
     root.rotation.y = rot.y;
-
-    // smooth-follow pin
-    pin.position.x += (state.targetX - pin.position.x) * (1 - Math.pow(0.001, dt));
-    pin.position.z += (state.targetZ - pin.position.z) * (1 - Math.pow(0.001, dt));
-    pin.position.y = 0.02 + Math.sin(t1 * 0.0022) * 0.02;
 
     pts.rotation.y -= dt * 0.04;
 
@@ -208,12 +238,7 @@ export function makeViz(canvas){
   tick();
 
   return {
-    setQuadrantXY(x, y){
-      const nx = clamp(x / 100, -1, 1);
-      const ny = clamp(y / 100, -1, 1);
-      state.targetX = nx * (half * 0.86);
-      state.targetZ = -ny * (half * 0.86);
-    }
+    setPins
   };
 }
 
@@ -266,15 +291,15 @@ function textSprite(text){
   return sprite;
 }
 
-function makeFlatSideLabel(text, x, z, y, yaw){
-  const mesh = textPlane(text);
+function makeFlatEdgeLabel(text, x, z, y, yaw){
+  const mesh = textPlaneDouble(text);
   mesh.position.set(x, y, z);
-  mesh.rotation.x = -Math.PI / 2; // lie flat
-  mesh.rotation.z = yaw;          // rotate around up-axis (because it is flat)
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.rotation.z = yaw;
   return mesh;
 }
 
-function textPlane(text){
+function textPlaneDouble(text){
   const canvas = document.createElement("canvas");
   canvas.width = 512;
   canvas.height = 128;
@@ -285,16 +310,25 @@ function textPlane(text){
   roundRect(ctx, 18, 18, 476, 92, 18);
   ctx.fill();
 
+  // draw text normally
   ctx.font = "900 54px ui-sans-serif, system-ui, Arial";
   ctx.fillStyle = "rgba(207,226,255,0.92)";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, 256, 64);
 
+  // draw text again mirrored (so it’s readable when rotated around)
+  ctx.save();
+  ctx.translate(256, 64);
+  ctx.rotate(Math.PI);
+  ctx.translate(-256, -64);
+  ctx.fillText(text, 256, 64);
+  ctx.restore();
+
   const tex = new THREE.CanvasTexture(canvas);
   tex.anisotropy = 4;
 
-  const geo = new THREE.PlaneGeometry(1.75, 0.42);
+  const geo = new THREE.PlaneGeometry(1.90, 0.42);
   const mat = new THREE.MeshBasicMaterial({
     map: tex,
     transparent:true,
@@ -316,4 +350,13 @@ function roundRect(ctx, x, y, w, h, r){
   ctx.arcTo(x, y+h, x, y, r);
   ctx.arcTo(x, y, x+w, y, r);
   ctx.closePath();
+}
+
+function hashTo01(str){
+  let h = 2166136261 >>> 0;
+  for(let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 4294967295;
 }
