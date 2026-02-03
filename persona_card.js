@@ -1,34 +1,47 @@
 import { buildOverviewPrompt } from "./prompts.js";
 
+const PRESET_URL = "./assets/avatars/presets.json";
+let PRESETS_CACHE = null;
+
+async function loadPresets(){
+  if(PRESETS_CACHE) return PRESETS_CACHE;
+  try{
+    const r = await fetch(PRESET_URL, { cache: "no-store" });
+    if(!r.ok) throw new Error("bad");
+    const j = await r.json();
+    if(!j || !Array.isArray(j.presets)) throw new Error("bad");
+    PRESETS_CACHE = j.presets;
+    return PRESETS_CACHE;
+  }catch{
+    PRESETS_CACHE = [];
+    return PRESETS_CACHE;
+  }
+}
+
 export function mountPersonaCards({
   layerEl,
   session,
   personas,
   selectedId,
+  workingId,
   getAggForPersona,
   getPointsForPersona,
   getAnswersForPersona,
   onSelect,
-  onDeselect,
   onUpdatePersona,
   onRemovePersona,
   onCopyText
 }){
   layerEl.innerHTML = "";
 
-  // background click deselect (only if click passes through layer background)
-  layerEl.addEventListener("pointerdown", (e) => {
-    if(e.target === layerEl){
-      onDeselect();
-    }
-  }, { once:true });
-
   for(const p of personas){
     const el = document.createElement("div");
-    el.className = "pfloat" + (p.id === selectedId ? " selected" : "") + (p.ui?.expanded ? " expanded" : "");
+    const isSelected = (p.id === selectedId);
+
+    el.className = "pfloat" + (isSelected ? " selected" : "") + (p.ui?.expanded ? " expanded" : "");
     el.dataset.pid = p.id;
 
-    const pos = session.ui?.persona_positions?.[p.id] || { x: 24, y: 180 };
+    const pos = session.ui?.persona_positions?.[p.id] || { x: 24, y: 160 };
     el.style.left = `${pos.x}px`;
     el.style.top = `${pos.y}px`;
 
@@ -36,38 +49,50 @@ export function mountPersonaCards({
     const agg = getAggForPersona(p.id);
     const points = getPointsForPersona(p.id);
 
-    el.innerHTML = `
-      <div class="pbar" data-drag="1">
-        <div class="pavatar" title="Click to change avatar">
-          <img alt="" src="${escapeAttr(p.avatar?.src || fallbackAvatar())}" />
-          <input class="pfile" type="file" accept="image/gif,image/png,image/webp" style="display:none" />
-        </div>
+    const canExpand = (points.now >= 100);
+    const expandTitle = canExpand ? "Expand" : "Locked until Fine-tune reaches 100";
 
-        <div class="pnamewrap">
-          <div class="pnameDisplay" title="${escapeAttr(name)}">${escapeHtml(name)}</div>
-          <div class="pnameEdit">
-            <input type="text" value="${escapeAttr(name)}" />
+    el.innerHTML = `
+      <div class="pbar">
+        <div class="pdrag" data-drag="1">
+          <div class="pavatar" data-nodrag="1" title="Change avatar">
+            <img alt="" src="${escapeAttr(p.avatar?.src || fallbackAvatar())}" />
+            <input class="pfile" type="file" accept="image/gif,image/png,image/webp" style="display:none" />
+          </div>
+
+          <div class="pnamewrap" data-nodrag="1">
+            <div class="pnameDisplay" title="${escapeAttr(name)}">${escapeHtml(name)}</div>
+            <div class="pnameEdit">
+              <input type="text" value="${escapeAttr(name)}" />
+            </div>
           </div>
         </div>
 
-        <div class="pchip">${points.total}</div>
+        <div class="pbarRight" data-nodrag="1">
+          <div class="pchip">Fine-tune: ${points.now}/100</div>
+          <button class="picon" data-action="toggleExpand" ${canExpand ? "" : "disabled"} title="${escapeAttr(expandTitle)}">▾</button>
+          <button class="picon" data-action="remove" title="Remove">✕</button>
+        </div>
       </div>
 
       <div class="pmini">
         <div class="pminiMap">
-          ${miniMapSvg(agg)}
+          ${miniMapSvg(agg, p.color || "#67d1ff")}
         </div>
         <div class="pminiMeta">
           <div><b>${escapeHtml(agg.quadrant.label)}</b></div>
-          <div style="margin-top:6px; color:${escapeAttr("rgba(138,160,184,1)")}">
+          <div style="margin-top:6px; color:rgba(138,160,184,1)">
             x=${agg.quadrant.x} • y=${agg.quadrant.y}
+          </div>
+          <div style="margin-top:6px; color:rgba(138,160,184,1)">
+            Total earned: ${points.total}
           </div>
         </div>
       </div>
 
       <div class="pexpand">
         <div class="pcloseRow">
-          <div class="pchip">Points: ${points.total} (cap 100)</div>
+          <div class="pchip">Fine-tune: ${points.now}/100 • Total: ${points.total}</div>
           <div class="row" style="margin:0">
             <button class="btn btn-secondary" data-action="collapse">Collapse</button>
           </div>
@@ -86,7 +111,6 @@ export function mountPersonaCards({
 
         <div class="row" style="margin-top:0">
           <button class="btn" data-action="copyOverviewPrompt">Copy overview prompt</button>
-          <button class="btn btn-ghost" data-action="removePersona">Remove</button>
         </div>
 
         <div class="smallnote">Paste the overview JSON here after the model generates it.</div>
@@ -104,35 +128,47 @@ export function mountPersonaCards({
 
     layerEl.appendChild(el);
 
-    // pointer events
-    wirePersonaCard(el, p);
+    wirePersonaCard(el, p, { isSelected, canExpand, agg, points });
   }
 
-  function wirePersonaCard(cardEl, persona){
-    // select on click (but not when dragging)
-    let dragging = false;
+  function wirePersonaCard(cardEl, persona, ctx){
+    // click selects
+    cardEl.addEventListener("pointerdown", (e) => {
+      // selection should not trigger when clicking inside popup or inputs
+      if(e.target.closest(".apop")) return;
+      if(e.target.closest("input") || e.target.closest("textarea")) return;
+      onSelect(persona.id);
+    });
 
-    // drag behavior
-    const bar = cardEl.querySelector(".pbar");
+    // drag behavior (reliable): document-level move/up, so it won't drop mid-drag
+    const dragHandle = cardEl.querySelector("[data-drag='1']");
+    let dragging = false;
     let drag = { on:false, ox:0, oy:0, startX:0, startY:0 };
 
-    bar.addEventListener("pointerdown", (e) => {
+    dragHandle.addEventListener("pointerdown", (e) => {
       if(e.button !== 0) return;
+      if(e.target.closest("[data-nodrag='1']")) return;
+
       dragging = false;
       drag.on = true;
       drag.ox = e.clientX;
       drag.oy = e.clientY;
       drag.startX = parseFloat(cardEl.style.left || "0");
       drag.startY = parseFloat(cardEl.style.top || "0");
-      bar.setPointerCapture(e.pointerId);
-    });
 
-    bar.addEventListener("pointermove", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      document.addEventListener("pointermove", onMove, true);
+      document.addEventListener("pointerup", onUp, true);
+    }, true);
+
+    function onMove(e){
       if(!drag.on) return;
       const dx = e.clientX - drag.ox;
       const dy = e.clientY - drag.oy;
 
-      if(Math.abs(dx) + Math.abs(dy) > 4) dragging = true;
+      if(Math.abs(dx) + Math.abs(dy) > 3) dragging = true;
 
       const nx = drag.startX + dx;
       const ny = drag.startY + dy;
@@ -141,37 +177,55 @@ export function mountPersonaCards({
 
       session.ui.persona_positions[persona.id] = { x: nx, y: ny };
       onUpdatePersona(session, persona, { ui: persona.ui || {} }, true);
-    });
 
-    bar.addEventListener("pointerup", (e) => {
-      drag.on = false;
-      try{ bar.releasePointerCapture(e.pointerId); }catch{}
-      if(!dragging){
-        onSelect(persona.id);
-      }
-    });
-
-    // expand on double click (bar)
-    bar.addEventListener("dblclick", (e) => {
       e.preventDefault();
+      e.stopPropagation();
+    }
+
+    function onUp(e){
+      drag.on = false;
+      document.removeEventListener("pointermove", onMove, true);
+      document.removeEventListener("pointerup", onUp, true);
+
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    // expand toggle
+    const btnExpand = cardEl.querySelector('[data-action="toggleExpand"]');
+    btnExpand.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if(btnExpand.hasAttribute("disabled")) return;
+
       const next = !(persona.ui?.expanded);
       onUpdatePersona(session, persona, { ui: { ...(persona.ui || {}), expanded: next } });
     });
 
-    // collapse button
-    const collapseBtn = cardEl.querySelector('[data-action="collapse"]');
-    if(collapseBtn){
-      collapseBtn.addEventListener("click", () => {
-        onUpdatePersona(session, persona, { ui: { ...(persona.ui || {}), expanded: false } });
-      });
-    }
+    const btnCollapse = cardEl.querySelector('[data-action="collapse"]');
+    btnCollapse.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onUpdatePersona(session, persona, { ui: { ...(persona.ui || {}), expanded: false } });
+    });
 
-    // name editing
+    // remove
+    const btnRemove = cardEl.querySelector('[data-action="remove"]');
+    btnRemove.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const ok = confirm("Remove this persona card and its linked answers?");
+      if(!ok) return;
+      onRemovePersona(persona.id);
+    });
+
+    // name editing with confirmation
     const display = cardEl.querySelector(".pnameDisplay");
     const editWrap = cardEl.querySelector(".pnameEdit");
     const input = editWrap.querySelector("input");
 
     display.addEventListener("click", (e) => {
+      e.preventDefault();
       e.stopPropagation();
       editWrap.style.display = "block";
       display.style.display = "none";
@@ -180,9 +234,7 @@ export function mountPersonaCards({
     });
 
     input.addEventListener("keydown", (e) => {
-      if(e.key === "Enter"){
-        input.blur();
-      }
+      if(e.key === "Enter") input.blur();
       if(e.key === "Escape"){
         input.value = persona.name || "Unnamed";
         input.blur();
@@ -190,24 +242,36 @@ export function mountPersonaCards({
     });
 
     input.addEventListener("blur", () => {
+      const oldName = (persona.name || "Unnamed").trim();
       const v = (input.value || "").trim() || "Unnamed";
+      // restore UI immediately
+      editWrap.style.display = "none";
+      display.style.display = "block";
+
+      if(v === oldName) return;
+
+      const ok = confirm("Set as card name?");
+      if(!ok){
+        input.value = oldName;
+        return;
+      }
       onUpdatePersona(session, persona, { name: v });
     });
 
-    // avatar click upload
+    // avatar: upload + preset picker popup
     const avatarWrap = cardEl.querySelector(".pavatar");
     const fileInput = cardEl.querySelector(".pfile");
 
-    avatarWrap.addEventListener("click", (e) => {
+    avatarWrap.addEventListener("click", async (e) => {
+      e.preventDefault();
       e.stopPropagation();
-      fileInput.click();
+      await openAvatarPopup(cardEl, persona);
     });
 
     fileInput.addEventListener("change", async () => {
       const f = fileInput.files?.[0];
       if(!f) return;
       if(f.size > 3_500_000){
-        // keep localStorage from exploding
         alert("That file is too big. Keep it under ~3.5MB.");
         fileInput.value = "";
         return;
@@ -217,7 +281,85 @@ export function mountPersonaCards({
       fileInput.value = "";
     });
 
-    // overview section
+    async function openAvatarPopup(cardEl, persona){
+      closeAnyPopup();
+
+      const pop = document.createElement("div");
+      pop.className = "apop";
+      pop.innerHTML = `
+        <div class="apopTitle">Avatar</div>
+        <div class="apopNote">
+          Upload (gif/png/webp) or choose a preset stored in the repo.
+          Presets are listed in <code>assets/avatars/presets.json</code>.
+        </div>
+
+        <div class="apopRow">
+          <button class="btn btn-secondary" data-action="upload">Upload</button>
+          <button class="btn btn-secondary" data-action="auto">Auto pick nearest</button>
+          <button class="btn btn-ghost" data-action="close">Close</button>
+        </div>
+
+        <div class="apopGrid" data-grid="1"></div>
+      `;
+
+      // position near card
+      const rect = cardEl.getBoundingClientRect();
+      const host = cardEl.parentElement;
+      const hostRect = host.getBoundingClientRect();
+
+      pop.style.left = `${Math.min(hostRect.width - 360, rect.left - hostRect.left)}px`;
+      pop.style.top = `${Math.min(hostRect.height - 240, rect.top - hostRect.top + 60)}px`;
+
+      // append to layer
+      host.appendChild(pop);
+      setActivePopup(pop);
+
+      const presets = await loadPresets();
+      const grid = pop.querySelector("[data-grid='1']");
+      grid.innerHTML = "";
+
+      // show up to 12 closest presets
+      const closest = closestPresets(presets, persona, 12);
+      for(const pr of closest){
+        const div = document.createElement("div");
+        div.className = "athumb";
+        div.title = `${pr.label || "preset"} (x=${pr.x}, y=${pr.y})`;
+        div.innerHTML = `<img alt="" src="${escapeAttr(pr.src)}" />`;
+        div.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onUpdatePersona(session, persona, { avatar: { kind:"preset", src: pr.src } });
+          closeAnyPopup();
+        });
+        grid.appendChild(div);
+      }
+
+      // handlers
+      pop.querySelector('[data-action="upload"]').addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        fileInput.click();
+        closeAnyPopup();
+      });
+
+      pop.querySelector('[data-action="auto"]').addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const pr = closestPresets(presets, persona, 1)[0];
+        if(pr){
+          onUpdatePersona(session, persona, { avatar: { kind:"preset", src: pr.src } });
+        }
+        closeAnyPopup();
+      });
+
+      pop.querySelector('[data-action="close"]').addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeAnyPopup();
+      });
+    }
+
+    // overview section wiring (only meaningful when expanded)
     const overviewIn = cardEl.querySelector(".overviewIn");
     const overviewMsg = cardEl.querySelector(".overviewMsg");
     const overviewRender = cardEl.querySelector(".overviewRender");
@@ -228,7 +370,9 @@ export function mountPersonaCards({
     }
 
     const btnCopy = cardEl.querySelector('[data-action="copyOverviewPrompt"]');
-    btnCopy.addEventListener("click", () => {
+    btnCopy.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       const answers = getAnswersForPersona(persona.id);
       const prompt = buildOverviewPrompt(answers);
       onCopyText(prompt);
@@ -236,7 +380,10 @@ export function mountPersonaCards({
     });
 
     const btnSave = cardEl.querySelector('[data-action="saveOverview"]');
-    btnSave.addEventListener("click", () => {
+    btnSave.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
       const raw = (overviewIn.value || "").trim();
       if(!raw){
         setMsg(overviewMsg, "Paste overview JSON first.", false);
@@ -257,22 +404,54 @@ export function mountPersonaCards({
     });
 
     const btnClear = cardEl.querySelector('[data-action="clearOverview"]');
-    btnClear.addEventListener("click", () => {
+    btnClear.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       onUpdatePersona(session, persona, { overview: null });
       overviewIn.value = "";
       overviewRender.innerHTML = "";
       setMsg(overviewMsg, "Cleared overview.", true);
     });
-
-    const btnRemove = cardEl.querySelector('[data-action="removePersona"]');
-    btnRemove.addEventListener("click", () => {
-      const ok = confirm("Remove this persona card and its linked answers?");
-      if(!ok) return;
-      onRemovePersona(persona.id);
-    });
   }
 }
 
+/* popup management */
+let ACTIVE_POP = null;
+function setActivePopup(pop){
+  ACTIVE_POP = pop;
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onDocDown, true);
+  }, 0);
+}
+function closeAnyPopup(){
+  if(ACTIVE_POP){
+    try{ ACTIVE_POP.remove(); }catch{}
+    ACTIVE_POP = null;
+    document.removeEventListener("pointerdown", onDocDown, true);
+  }
+}
+function onDocDown(e){
+  if(!ACTIVE_POP) return;
+  if(e.target.closest(".apop")) return;
+  closeAnyPopup();
+}
+
+/* presets */
+function closestPresets(presets, persona, n){
+  const x = Number(persona.axes_xy?.x ?? 0);
+  const y = Number(persona.axes_xy?.y ?? 0);
+
+  const scored = presets.map(pr => {
+    const dx = (Number(pr.x) - x);
+    const dy = (Number(pr.y) - y);
+    const d2 = dx*dx + dy*dy;
+    return { ...pr, _d2: d2 };
+  }).sort((a,b) => a._d2 - b._d2);
+
+  return scored.slice(0, n);
+}
+
+/* render helpers */
 function traitBlock(label, value){
   const v = clamp(value);
   const pct = v;
@@ -294,30 +473,29 @@ function traitBlock(label, value){
 }
 
 function descriptor(label, v){
-  // Make “centered” feel rewarding, not like “mid”
-  const band = (v >= 45 && v <= 55) ? "Balanced and flexible." :
-               (v >= 35 && v <= 65) ? "Well-rounded range." :
-               (v < 35) ? "Lower pull here, other traits may dominate." :
-               "Strong pull here, this trait often drives choices.";
+  const band =
+    (v >= 45 && v <= 55) ? "Balanced and flexible." :
+    (v >= 35 && v <= 65) ? "Well-rounded range." :
+    (v < 35) ? "Lower pull here, other traits may dominate." :
+    "Strong pull here, this trait often drives choices.";
 
   if(label === "Frivolity"){
     if(v <= 15) return "Mostly serious answers. Good signal quality.";
-    if(v <= 35) return "Some joking or performative tone, still usable.";
+    if(v <= 35) return "Some joking tone, still usable.";
     return "High unserious energy. Interpret with caution.";
   }
   if(label === "Calibration"){
     if(v >= 65) return "Grounded and reality-checked under uncertainty.";
-    if(v >= 45) return "Generally grounded, occasional leaps or blind spots.";
-    return "More risk of confident leaps, needs more constraint-based answers.";
+    if(v >= 45) return "Generally grounded, occasional leaps.";
+    return "More risk of confident leaps. Needs more constraint-based answers.";
   }
   return band;
 }
 
-function miniMapSvg(agg){
+function miniMapSvg(agg, dotColor){
   const x = clampSigned(agg.quadrant.x, -100, 100);
   const y = clampSigned(agg.quadrant.y, -100, 100);
 
-  // map [-100,100] => [12,108]
   const px = 60 + (x / 100) * 46;
   const py = 60 - (y / 100) * 46;
 
@@ -332,8 +510,8 @@ function miniMapSvg(agg){
     <text x="16" y="62" font-size="9" text-anchor="start" fill="rgba(207,226,255,0.90)">Empathy</text>
     <text x="104" y="62" font-size="9" text-anchor="end" fill="rgba(207,226,255,0.90)">Practicality</text>
 
-    <circle cx="${px}" cy="${py}" r="4.2" fill="rgba(103,209,255,0.95)" />
-    <circle cx="${px}" cy="${py}" r="9" fill="rgba(103,209,255,0.12)" />
+    <circle cx="${px}" cy="${py}" r="4.2" fill="${escapeAttr(dotColor)}" />
+    <circle cx="${px}" cy="${py}" r="9" fill="${escapeAttr(hexToRgba(dotColor, 0.12))}" />
   </svg>`;
 }
 
@@ -421,6 +599,7 @@ function escapeHtml(s){
 function escapeAttr(s){
   return String(s).replaceAll("&","&amp;").replaceAll("\"","&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 }
+
 function fallbackAvatar(){
   return `data:image/svg+xml;utf8,${encodeURIComponent(fallbackAvatarSvg())}`;
 }
@@ -436,4 +615,13 @@ function fallbackAvatarSvg(){
     </defs>
     <rect width="200" height="200" fill="url(#g)"/>
   </svg>`;
+}
+
+function hexToRgba(hex, a){
+  const h = String(hex || "#67d1ff").replace("#","");
+  const n = parseInt(h.length === 3 ? h.split("").map(c=>c+c).join("") : h, 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return `rgba(${r},${g},${b},${a})`;
 }
