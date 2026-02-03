@@ -11,14 +11,9 @@ async function loadPresets(){
     if(!r.ok) throw new Error("bad fetch");
     const j = await r.json();
 
-    // Accept either:
-    // 1) raw array: [ { name, src, x, y, ... }, ... ]
-    // 2) object: { presets: [ ... ] }
     const arr = Array.isArray(j) ? j : (j && Array.isArray(j.presets) ? j.presets : null);
     if(!arr) throw new Error("bad json shape");
 
-    // Normalize into the shape our UI expects: { label, src, x, y }
-    // Also map legacy "playfulness" -> "frivolity" if present (optional).
     PRESETS_CACHE = arr
       .filter(p => p && typeof p.src === "string")
       .map(p => ({
@@ -26,7 +21,7 @@ async function loadPresets(){
         src: p.src,
         x: Number(p.x ?? 0),
         y: Number(p.y ?? 0),
-        calibration: Number(p.calibration ?? 0),
+        calibration: Number(p.calibration ?? 50),
         frivolity: Number(p.frivolity ?? p.playfulness ?? 0)
       }));
 
@@ -42,44 +37,46 @@ export function mountPersonaCards({
   session,
   personas,
   selectedId,
-  workingId,
   getAggForPersona,
   getPointsForPersona,
   getAnswersForPersona,
   onSelect,
+  onDeselect,
   onUpdatePersona,
+  onUpdatePersonaPosition,
   onRemovePersona,
   onCopyText
 }){
   layerEl.innerHTML = "";
 
   for(const p of personas){
-    const el = document.createElement("div");
+    const cardEl = document.createElement("div");
     const isSelected = (p.id === selectedId);
 
-    el.className = "pfloat" + (isSelected ? " selected" : "") + (p.ui?.expanded ? " expanded" : "");
-    el.dataset.pid = p.id;
-
-    const pos = session.ui?.persona_positions?.[p.id] || { x: 24, y: 160 };
-    el.style.left = `${pos.x}px`;
-    el.style.top = `${pos.y}px`;
-
-    const name = (p.name || "Unnamed").trim();
     const agg = getAggForPersona(p.id);
     const points = getPointsForPersona(p.id);
 
     const canExpand = (points.now >= 100);
     const expandTitle = canExpand ? "Expand" : "Locked until Fine-tune reaches 100";
 
-    el.innerHTML = `
-      <div class="pbar">
+    cardEl.className = "pfloat" + (isSelected ? " selected" : "") + (p.ui?.expanded ? " expanded" : "");
+    cardEl.dataset.pid = p.id;
+
+    const pos = session.ui?.persona_positions?.[p.id] || { x: 24, y: 160 };
+    cardEl.style.left = `${pos.x}px`;
+    cardEl.style.top = `${pos.y}px`;
+
+    const name = (p.name || "Unnamed").trim();
+
+    cardEl.innerHTML = `
+      <div class="pbar" data-bar="1">
         <div class="pdrag" data-drag="1">
-          <div class="pavatar" data-nodrag="1" title="Change avatar">
+          <div class="pavatar" title="Change avatar">
             <img alt="" src="${escapeAttr(p.avatar?.src || fallbackAvatar())}" />
             <input class="pfile" type="file" accept="image/gif,image/png,image/webp" style="display:none" />
           </div>
 
-          <div class="pnamewrap" data-nodrag="1">
+          <div class="pnamewrap">
             <div class="pnameDisplay" title="${escapeAttr(name)}">${escapeHtml(name)}</div>
             <div class="pnameEdit">
               <input type="text" value="${escapeAttr(name)}" />
@@ -87,10 +84,10 @@ export function mountPersonaCards({
           </div>
         </div>
 
-        <div class="pbarRight" data-nodrag="1">
+        <div class="pbarRight">
           <div class="pchip">Fine-tune: ${points.now}/100</div>
           <button class="picon" data-action="toggleExpand" ${canExpand ? "" : "disabled"} title="${escapeAttr(expandTitle)}">▾</button>
-          <button class="picon" data-action="remove" title="Remove">✕</button>
+          <button class="picon" data-action="remove" title="Remove card">✕</button>
         </div>
       </div>
 
@@ -145,30 +142,36 @@ export function mountPersonaCards({
       </div>
     `;
 
-    layerEl.appendChild(el);
+    layerEl.appendChild(cardEl);
 
-    wirePersonaCard(el, p, { isSelected, canExpand, agg, points });
+    wirePersonaCard(cardEl, p.id, { isSelected, canExpand, agg, points });
   }
 
-  function wirePersonaCard(cardEl, persona, ctx){
-    // click selects
-    cardEl.addEventListener("pointerdown", (e) => {
-      // selection should not trigger when clicking inside popup or inputs
-      if(e.target.closest(".apop")) return;
+  function wirePersonaCard(cardEl, personaId, ctx){
+    // Toggle select when clicking card background (not buttons/inputs)
+    cardEl.addEventListener("click", (e) => {
+      if(e.target.closest("button")) return;
       if(e.target.closest("input") || e.target.closest("textarea")) return;
-      onSelect(persona.id);
+      if(e.target.closest(".apop")) return;
+
+      if(selectedId === personaId){
+        if(onDeselect) onDeselect();
+      }else{
+        onSelect(personaId);
+      }
     });
 
-    // drag behavior (reliable): document-level move/up, so it won't drop mid-drag
-    const dragHandle = cardEl.querySelector("[data-drag='1']");
-    let dragging = false;
+    // Drag from top bar, except real interactive elements
+    const bar = cardEl.querySelector("[data-bar='1']");
     let drag = { on:false, ox:0, oy:0, startX:0, startY:0 };
 
-    dragHandle.addEventListener("pointerdown", (e) => {
+    bar.addEventListener("pointerdown", (e) => {
       if(e.button !== 0) return;
-      if(e.target.closest("[data-nodrag='1']")) return;
 
-      dragging = false;
+      // Block drag when clicking interactive things
+      if(e.target.closest("button")) return;
+      if(e.target.closest("input") || e.target.closest("textarea")) return;
+
       drag.on = true;
       drag.ox = e.clientX;
       drag.oy = e.clientY;
@@ -184,18 +187,19 @@ export function mountPersonaCards({
 
     function onMove(e){
       if(!drag.on) return;
+
       const dx = e.clientX - drag.ox;
       const dy = e.clientY - drag.oy;
 
-      if(Math.abs(dx) + Math.abs(dy) > 3) dragging = true;
-
       const nx = drag.startX + dx;
       const ny = drag.startY + dy;
+
       cardEl.style.left = `${nx}px`;
       cardEl.style.top = `${ny}px`;
 
-      session.ui.persona_positions[persona.id] = { x: nx, y: ny };
-      onUpdatePersona(session, persona, { ui: persona.ui || {} }, true);
+      if(onUpdatePersonaPosition){
+        onUpdatePersonaPosition(personaId, { x: nx, y: ny });
+      }
 
       e.preventDefault();
       e.stopPropagation();
@@ -217,15 +221,15 @@ export function mountPersonaCards({
       e.stopPropagation();
       if(btnExpand.hasAttribute("disabled")) return;
 
-      const next = !(persona.ui?.expanded);
-      onUpdatePersona(session, persona, { ui: { ...(persona.ui || {}), expanded: next } });
+      const expanded = !(getPersonaUi(personaId).expanded);
+      onUpdatePersona(session, personaId, { ui: { ...getPersonaUi(personaId), expanded } });
     });
 
     const btnCollapse = cardEl.querySelector('[data-action="collapse"]');
     btnCollapse.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      onUpdatePersona(session, persona, { ui: { ...(persona.ui || {}), expanded: false } });
+      onUpdatePersona(session, personaId, { ui: { ...getPersonaUi(personaId), expanded: false } });
     });
 
     // remove
@@ -235,10 +239,10 @@ export function mountPersonaCards({
       e.stopPropagation();
       const ok = confirm("Remove this persona card and its linked answers?");
       if(!ok) return;
-      onRemovePersona(persona.id);
+      onRemovePersona(personaId);
     });
 
-    // name editing with confirmation
+    // name editing
     const display = cardEl.querySelector(".pnameDisplay");
     const editWrap = cardEl.querySelector(".pnameEdit");
     const input = editWrap.querySelector("input");
@@ -254,37 +258,39 @@ export function mountPersonaCards({
 
     input.addEventListener("keydown", (e) => {
       if(e.key === "Enter") input.blur();
-      if(e.key === "Escape"){
-        input.value = persona.name || "Unnamed";
-        input.blur();
-      }
+      if(e.key === "Escape") input.blur();
     });
 
     input.addEventListener("blur", () => {
-      const oldName = (persona.name || "Unnamed").trim();
+      const persona = session.personas.find(x => x.id === personaId);
+      const oldName = (persona?.name || "Unnamed").trim();
       const v = (input.value || "").trim() || "Unnamed";
-      // restore UI immediately
+
       editWrap.style.display = "none";
       display.style.display = "block";
 
-      if(v === oldName) return;
+      if(v === oldName){
+        input.value = oldName;
+        return;
+      }
 
       const ok = confirm("Set as card name?");
       if(!ok){
         input.value = oldName;
         return;
       }
-      onUpdatePersona(session, persona, { name: v });
+
+      onUpdatePersona(session, personaId, { name: v });
     });
 
-    // avatar: upload + preset picker popup
+    // avatar popup
     const avatarWrap = cardEl.querySelector(".pavatar");
     const fileInput = cardEl.querySelector(".pfile");
 
     avatarWrap.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      await openAvatarPopup(cardEl, persona);
+      await openAvatarPopup(cardEl, personaId, ctx.agg);
     });
 
     fileInput.addEventListener("change", async () => {
@@ -296,11 +302,11 @@ export function mountPersonaCards({
         return;
       }
       const dataUrl = await readAsDataURL(f);
-      onUpdatePersona(session, persona, { avatar: { kind:"upload", src:dataUrl } });
+      onUpdatePersona(session, personaId, { avatar: { kind:"upload", src:dataUrl } });
       fileInput.value = "";
     });
 
-    async function openAvatarPopup(cardEl, persona){
+    async function openAvatarPopup(cardEl, personaId, agg){
       closeAnyPopup();
 
       const pop = document.createElement("div");
@@ -309,7 +315,7 @@ export function mountPersonaCards({
         <div class="apopTitle">Avatar</div>
         <div class="apopNote">
           Upload (gif/png/webp) or choose a preset stored in the repo.
-          Presets are listed in <code>assets/avatars/presets.json</code>.
+          Presets are listed in <code>assets/presets.json</code>.
         </div>
 
         <div class="apopRow">
@@ -321,7 +327,6 @@ export function mountPersonaCards({
         <div class="apopGrid" data-grid="1"></div>
       `;
 
-      // position near card
       const rect = cardEl.getBoundingClientRect();
       const host = cardEl.parentElement;
       const hostRect = host.getBoundingClientRect();
@@ -329,7 +334,6 @@ export function mountPersonaCards({
       pop.style.left = `${Math.min(hostRect.width - 360, rect.left - hostRect.left)}px`;
       pop.style.top = `${Math.min(hostRect.height - 240, rect.top - hostRect.top + 60)}px`;
 
-      // append to layer
       host.appendChild(pop);
       setActivePopup(pop);
 
@@ -337,8 +341,14 @@ export function mountPersonaCards({
       const grid = pop.querySelector("[data-grid='1']");
       grid.innerHTML = "";
 
-      // show up to 12 closest presets
-      const closest = closestPresets(presets, persona, 12);
+      const target = {
+        x: agg.quadrant.x,
+        y: agg.quadrant.y,
+        calibration: agg.meta.calibration,
+        frivolity: agg.meta.frivolity
+      };
+
+      const closest = closestPresets(presets, target, 12);
       for(const pr of closest){
         const div = document.createElement("div");
         div.className = "athumb";
@@ -347,13 +357,12 @@ export function mountPersonaCards({
         div.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
-          onUpdatePersona(session, persona, { avatar: { kind:"preset", src: pr.src } });
+          onUpdatePersona(session, personaId, { avatar: { kind:"preset", src: pr.src } });
           closeAnyPopup();
         });
         grid.appendChild(div);
       }
 
-      // handlers
       pop.querySelector('[data-action="upload"]').addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -364,9 +373,9 @@ export function mountPersonaCards({
       pop.querySelector('[data-action="auto"]').addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const pr = closestPresets(presets, persona, 1)[0];
+        const pr = closestPresets(presets, target, 1)[0];
         if(pr){
-          onUpdatePersona(session, persona, { avatar: { kind:"preset", src: pr.src } });
+          onUpdatePersona(session, personaId, { avatar: { kind:"preset", src: pr.src } });
         }
         closeAnyPopup();
       });
@@ -378,21 +387,22 @@ export function mountPersonaCards({
       });
     }
 
-    // overview section wiring (only meaningful when expanded)
+    // overview wiring
     const overviewIn = cardEl.querySelector(".overviewIn");
     const overviewMsg = cardEl.querySelector(".overviewMsg");
     const overviewRender = cardEl.querySelector(".overviewRender");
 
-    if(persona.overview){
-      overviewIn.value = JSON.stringify(persona.overview, null, 2);
-      renderOverview(persona.overview, overviewRender);
+    const personaNow = session.personas.find(x => x.id === personaId);
+    if(personaNow?.overview){
+      overviewIn.value = JSON.stringify(personaNow.overview, null, 2);
+      renderOverview(personaNow.overview, overviewRender);
     }
 
     const btnCopy = cardEl.querySelector('[data-action="copyOverviewPrompt"]');
     btnCopy.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const answers = getAnswersForPersona(persona.id);
+      const answers = getAnswersForPersona(personaId);
       const prompt = buildOverviewPrompt(answers);
       onCopyText(prompt);
       setMsg(overviewMsg, "Copied prompt.", true);
@@ -417,7 +427,7 @@ export function mountPersonaCards({
         setMsg(overviewMsg, "schema_version must be persona_overview.v2", false);
         return;
       }
-      onUpdatePersona(session, persona, { overview: obj });
+      onUpdatePersona(session, personaId, { overview: obj });
       renderOverview(obj, overviewRender);
       setMsg(overviewMsg, "Saved overview.", true);
     });
@@ -426,11 +436,16 @@ export function mountPersonaCards({
     btnClear.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      onUpdatePersona(session, persona, { overview: null });
+      onUpdatePersona(session, personaId, { overview: null });
       overviewIn.value = "";
       overviewRender.innerHTML = "";
       setMsg(overviewMsg, "Cleared overview.", true);
     });
+  }
+
+  function getPersonaUi(pid){
+    const p = session.personas.find(x => x.id === pid);
+    return (p && p.ui && typeof p.ui === "object") ? p.ui : { expanded:false };
   }
 }
 
@@ -456,14 +471,18 @@ function onDocDown(e){
 }
 
 /* presets */
-function closestPresets(presets, persona, n){
-  const x = Number(persona.axes_xy?.x ?? 0);
-  const y = Number(persona.axes_xy?.y ?? 0);
+function closestPresets(presets, target, n){
+  const x = Number(target.x ?? 0);
+  const y = Number(target.y ?? 0);
+  const c = Number(target.calibration ?? 50);
+  const f = Number(target.frivolity ?? 0);
 
   const scored = presets.map(pr => {
     const dx = (Number(pr.x) - x);
     const dy = (Number(pr.y) - y);
-    const d2 = dx*dx + dy*dy;
+    const dc = (Number(pr.calibration ?? 50) - c) * 0.35;
+    const df = (Number(pr.frivolity ?? 0) - f) * 0.20;
+    const d2 = dx*dx + dy*dy + dc*dc + df*df;
     return { ...pr, _d2: d2 };
   }).sort((a,b) => a._d2 - b._d2);
 
@@ -573,7 +592,7 @@ function renderOverview(obj, mount){
 
     <div class="divider"></div>
 
-    <div style="margin-top:10px"><b>Model's confidence note</b><div style="margin-top:6px">${escapeHtml(obj.model_confidence_note || "")}</div></div>
+    <div style="margin-top:10px"><b>Model confidence note</b><div style="margin-top:6px">${escapeHtml(obj.model_confidence_note || "")}</div></div>
   `;
 }
 
