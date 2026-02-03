@@ -3,182 +3,75 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Persona 3D</title>
+    <title>persona-3d</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
-
   <body>
     <div id="app">
-      <header class="topbar">
-        <div class="brand">
-          <div class="dot"></div>
-          <div>
-            <div class="title">Persona 3D</div>
-            <div class="subtitle">Essay answers • LLM scoring • Local-first</div>
+      <aside id="sidebar">
+        <div class="panel">
+          <div class="panel-title">Current question</div>
+
+          <button id="btnToggleQuestion" class="btn secondary">Show question</button>
+
+          <div class="hint">
+            Tip: click or drag the 3D plane background to hide the question window.
           </div>
         </div>
 
-        <div class="topbar-actions">
-          <button id="btnReset" class="btn btn-ghost" title="Reset local data">Reset</button>
+        <div class="panel">
+          <div class="panel-title">Paste LLM JSON</div>
 
-          <button id="btnExportCard" class="btn btn-ghost" title="Export selected card, or the current working card">
-            Export card
-          </button>
-
-          <label class="btn btn-ghost file" title="Import a persona card JSON">
-            Import card
-            <input id="fileImportCard" type="file" accept="application/json" />
+          <label class="field">
+            <span class="field-label">Model label (optional)</span>
+            <input id="modelLabel" class="input" placeholder="ex: GPT-5.2 Thinking" />
           </label>
+
+          <textarea id="jsonInput" class="textarea" placeholder="Paste the strict JSON from the LLM here..."></textarea>
+
+          <div class="row">
+            <button id="btnParseSave" class="btn primary">Parse + save</button>
+            <button id="btnClearInput" class="btn secondary">Clear</button>
+          </div>
+
+          <div id="parseStatus" class="status"></div>
         </div>
-      </header>
 
-      <main class="layout">
-        <section class="panel" id="leftPanel">
-          <div class="card">
-            <div class="card-h">
-              <div class="card-title">Current question</div>
-              <div class="pill" id="pillMode">Working</div>
-            </div>
+        <div id="progressPanel" class="panel hidden">
+          <div class="panel-title">Progress</div>
 
-            <div class="q-meta" id="qMeta"></div>
-            <div class="q-body" id="qBody"></div>
-
-            <div class="row">
-              <button id="btnCopyPrimer" class="btn">Copy primer</button>
-              <button id="btnCopyQuestion" class="btn btn-secondary">Copy this question</button>
-            </div>
-
-            <div class="smallnote">
-              Paste the primer once per LLM chat. Then for each question: paste the question prompt, answer in essay form,
-              and paste the JSON output back here.
-            </div>
+          <div class="progress-row">
+            <div class="progress-label">Unlock Overview:</div>
+            <div class="progress-value" id="progressText">0/100</div>
           </div>
 
-          <div class="card">
-            <div class="card-h">
-              <div class="card-title">Paste LLM JSON</div>
-              <div class="pill pill-warn" id="pillStatus">Waiting</div>
-            </div>
-
-            <div class="fieldrow">
-              <label class="field">
-                <div class="fieldlabel">Model label (optional)</div>
-                <input id="modelLabel" type="text" placeholder='e.g. "GPT-5.2 Thinking"' />
-              </label>
-            </div>
-
-            <textarea id="jsonIn" spellcheck="false" placeholder="Paste the model output here (JSON only)."></textarea>
-
-            <div class="row">
-              <button id="btnParse" class="btn">Parse + save</button>
-              <button id="btnNext" class="btn btn-secondary" title="Skip to next question without saving">Skip</button>
-            </div>
-
-            <div id="parseMsg" class="msg"></div>
-
-            <details class="details">
-              <summary>Clarification support</summary>
-              <div class="smallnote">
-                The model can set <code>needs_clarification.is_needed=true</code>. If so, the site shows a re-explain + a
-                re-ask prompt.
-              </div>
-              <div id="clarifyBox" class="clarify"></div>
-            </details>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
           </div>
+        </div>
 
-          <div class="card" id="progressCard">
-            <div class="card-h">
-              <div class="card-title">Progress</div>
-              <div class="pill" id="pillQuadrant">Quadrant: —</div>
-            </div>
+        <div id="historyPanel" class="panel hidden">
+          <div class="panel-title">Answer history</div>
+          <div id="historyList" class="history"></div>
+        </div>
+      </aside>
 
-            <div id="progressPlaceholder" class="smallnote">
-              Answer one question to start tracking progress.
-            </div>
+      <main id="stage">
+        <div id="threeWrap">
+          <canvas id="threeCanvas"></canvas>
+        </div>
 
-            <div id="progressInner" style="display:none">
-              <div class="progress">
-                <div class="progressbar">
-                  <div class="progressfill" id="progressFill"></div>
-                </div>
-                <div class="progressmeta">
-                  <!-- Changed label from "Fine-tune" to "Unlock Overview" -->
-                  <div><span class="muted">Unlock Overview:</span> <span id="ptsNow">0</span> / 100 <span class="muted">(cap)</span></div>
-                  <div><span class="muted">Total earned:</span> <span id="ptsTotal">0</span></div>
-                </div>
-              </div>
+        <div id="personaLayer"></div>
 
-              <div class="grid2">
-                <div class="kv"><div class="k">Practicality</div><div class="v" id="vPracticality">—</div></div>
-                <div class="kv"><div class="k">Empathy</div><div class="v" id="vEmpathy">—</div></div>
-                <div class="kv"><div class="k">Knowledge</div><div class="v" id="vKnowledge">—</div></div>
-                <div class="kv"><div class="k">Wisdom</div><div class="v" id="vWisdom">—</div></div>
-              </div>
-
-              <div class="divider"></div>
-
-              <div class="grid2">
-                <div class="kv"><div class="k">Calibration</div><div class="v" id="vCalibration">—</div></div>
-                <div class="kv"><div class="k">Frivolity</div><div class="v" id="vFrivolity">—</div></div>
-              </div>
-
-              <div class="smallnote">
-                Calibration = groundedness + epistemic humility. Frivolity flags unserious answers without punishing creativity.
-              </div>
-            </div>
+        <div id="questionWindow" class="question-window hidden">
+          <div class="question-media">
+            <img id="questionImg" alt="" />
+            <div id="noImg" class="no-img">No image yet</div>
           </div>
-
-          <div class="card" id="historyCard">
-            <div class="card-h">
-              <div class="card-title">Answer history</div>
-              <div class="pill" id="pillSaved">Saved: 0</div>
-            </div>
-
-            <div id="historyPlaceholder" class="smallnote">
-              Answer one question to start building history.
-            </div>
-
-            <div id="history" class="history" style="display:none"></div>
-          </div>
-        </section>
-
-        <section class="viz" id="vizRoot">
-          <canvas id="c"></canvas>
-
-          <div class="viz-top" id="qFrame">
-            <div class="qframe">
-              <div class="qimgwrap">
-                <img id="qImg" alt="" />
-                <div id="qImgPlaceholder" class="qimgph">No image yet</div>
-              </div>
-              <div class="qprint">
-                <div class="qprintTitle" id="qPrintTitle">—</div>
-                <div class="qprintBody" id="qPrintBody">—</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="viz-overlay">
-            <div class="viz-title">Quadrant plane</div>
-            <div class="viz-sub">
-              x = practicality − empathy<br />
-              y = wisdom − knowledge
-            </div>
-          </div>
-
-          <div id="personaLayer"></div>
-        </section>
+          <div id="questionText" class="question-text"></div>
+        </div>
       </main>
     </div>
-
-    <script type="importmap">
-      {
-        "imports": {
-          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/"
-        }
-      }
-    </script>
 
     <script type="module" src="./main.js"></script>
   </body>
