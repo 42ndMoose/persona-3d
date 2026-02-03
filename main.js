@@ -1,568 +1,526 @@
-import { createThreeViz } from "./three_viz.js";
-import { PersonaCard } from "./persona_card.js";
+import { QUESTIONS } from "./questions.js";
+import { buildPrimerPrompt, buildQuestionPrompt } from "./prompts.js";
+import { loadSession, saveSession, clearSession } from "./store.js";
+import {
+  validateAndMigrateModelJson,
+  stableHashForDuplicate,
+  answersForTarget,
+  computeAggregate,
+  deriveQuadrant,
+  pickNextQuestion,
+  shouldAutoCreatePersonaFromDraft,
+  newId
+} from "./scoring.js";
+import { makeViz } from "./three_viz.js";
+import { mountPersonaCards } from "./persona_card.js";
 
-const LS_KEY = "persona3d_v4";
+const el = (id) => document.getElementById(id);
 
-const COLORS = [
-  0x55a7ff, 0xff7a55, 0x5dff9a, 0xff55c8, 0xffd955,
-  0xb455ff, 0x55fff7, 0xff5555, 0x86ff55, 0x5591ff
-];
+const ui = {
+  qMeta: el("qMeta"),
+  qBody: el("qBody"),
+  qPrintTitle: el("qPrintTitle"),
+  qPrintBody: el("qPrintBody"),
+  qImg: el("qImg"),
+  qImgPlaceholder: el("qImgPlaceholder"),
 
-function nowIso() {
-  return new Date().toISOString();
-}
+  modelLabel: el("modelLabel"),
+  jsonIn: el("jsonIn"),
+  parseMsg: el("parseMsg"),
+  clarifyBox: el("clarifyBox"),
 
-function safeParseJson(text) {
-  try { return JSON.parse(text); } catch { return null; }
-}
+  pillStatus: el("pillStatus"),
+  pillSaved: el("pillSaved"),
+  pillMode: el("pillMode"),
+  pillQuadrant: el("pillQuadrant"),
 
-function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+  progressCard: el("progressCard"),
+  progressPlaceholder: el("progressPlaceholder"),
+  progressInner: el("progressInner"),
+  progressFill: el("progressFill"),
+  ptsNow: el("ptsNow"),
+  ptsTotal: el("ptsTotal"),
 
-function normalizePreset(p) {
-  // Back-compat: playfulness -> frivolity
-  const out = { ...p };
-  if (out.frivolity == null && out.playfulness != null) out.frivolity = out.playfulness;
-  return out;
-}
+  vPracticality: el("vPracticality"),
+  vEmpathy: el("vEmpathy"),
+  vKnowledge: el("vKnowledge"),
+  vWisdom: el("vWisdom"),
+  vCalibration: el("vCalibration"),
+  vFrivolity: el("vFrivolity"),
 
-async function loadPresets() {
-  try {
-    const res = await fetch("./assets/presets.json", { cache: "no-store" });
-    if (!res.ok) return [];
-    const arr = await res.json();
-    return Array.isArray(arr) ? arr.map(normalizePreset) : [];
-  } catch {
-    return [];
+  historyCard: el("historyCard"),
+  historyPlaceholder: el("historyPlaceholder"),
+  history: el("history"),
+
+  personaLayer: el("personaLayer"),
+  vizRoot: el("vizRoot"),
+
+  btnCopyPrimer: el("btnCopyPrimer"),
+  btnCopyQuestion: el("btnCopyQuestion"),
+  btnParse: el("btnParse"),
+  btnNext: el("btnNext"),
+  btnReset: el("btnReset"),
+  btnExport: el("btnExport"),
+  fileImport: el("fileImport")
+};
+
+let session = loadSession();
+
+// default persona positions store
+if(!session.ui.persona_positions) session.ui.persona_positions = {};
+
+const viz = makeViz(el("c"));
+
+let selectedPersonaId = session.selected_persona_id || null;
+
+// current target is selected persona, else draft (null)
+function currentTargetId(){ return selectedPersonaId; }
+function targetAnswers(){ return answersForTarget(session, currentTargetId()); }
+
+let currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+
+renderAll();
+
+ui.btnCopyPrimer.addEventListener("click", async () => {
+  await copyText(buildPrimerPrompt());
+  toastOk("Primer copied.");
+});
+
+ui.btnCopyQuestion.addEventListener("click", async () => {
+  await copyText(buildQuestionPrompt(currentQuestion));
+  toastOk(`Question ${currentQuestion.id} copied.`);
+});
+
+ui.btnParse.addEventListener("click", () => {
+  ui.clarifyBox.textContent = "";
+
+  const raw = ui.jsonIn.value.trim();
+  if(!raw){
+    toastBad("Paste JSON first.");
+    return;
   }
-}
 
-function pickPresetAvatar(presets, coords, meta) {
-  if (!presets.length) return "./assets/presets/WP_0.png";
-
-  const cx = coords.x;
-  const cy = coords.y;
-  const cal = meta.calibration ?? 60;
-  const friv = meta.frivolity ?? 10;
-
-  let best = presets[0];
-  let bestD = Infinity;
-
-  for (const pr of presets) {
-    const dx = (pr.x ?? 0) - cx;
-    const dy = (pr.y ?? 0) - cy;
-    const dm = Math.abs((pr.calibration ?? cal) - cal) * 0.35 + Math.abs((pr.frivolity ?? friv) - friv) * 0.20;
-    const d = Math.sqrt(dx * dx + dy * dy) + dm;
-    if (d < bestD) { bestD = d; best = pr; }
+  let obj;
+  try{
+    obj = JSON.parse(raw);
+  }catch{
+    toastBad("Invalid JSON. Make sure the model output is JSON only.");
+    return;
   }
-  return best.src || "./assets/presets/WP_0.png";
-}
 
-function computeCoordsFromAxes(axes) {
-  // If you already provide quadrant_position.x/y, we use that.
-  // Otherwise we derive:
-  // x = wisdom - knowledge
-  // y = practicality - empathy
-  const w = axes.wisdom ?? 50;
-  const k = axes.knowledge ?? 50;
-  const p = axes.practicality ?? 50;
-  const e = axes.empathy ?? 50;
+  const v = validateAndMigrateModelJson(obj);
+  if(!v.ok){
+    toastBad("Schema errors:\n- " + v.errs.join("\n- "));
+    return;
+  }
 
-  const x = clamp((w - k), -50, 50);
-  const y = clamp((p - e), -50, 50);
-  return { x, y };
-}
+  const migrated = v.migrated;
 
-function buildHistoryItem(a) {
-  const title = a.question_title || a.question_id || "Answer";
-  const meta = `${new Date(a.timestamp).toLocaleString()} • ${a.modelLabel || "Unspecified model"}`;
-  const body = a.summary || a.raw_excerpt || "";
-  return { title, meta, body };
-}
+  if(migrated.qid !== currentQuestion.id){
+    // warn but allow
+    toastBad(`Warning: JSON qid=${migrated.qid} but current question is ${currentQuestion.id}. Saving anyway.`);
+  }
 
-function loadState() {
-  const raw = localStorage.getItem(LS_KEY);
-  const parsed = raw ? safeParseJson(raw) : null;
-  if (!parsed || typeof parsed !== "object") return null;
-  return parsed;
-}
+  const qSnap = QUESTIONS.find(q => q.id === migrated.qid) || currentQuestion;
 
-function saveState(state) {
-  localStorage.setItem(LS_KEY, JSON.stringify(state));
-}
+  const personaId = currentTargetId(); // null means draft
+  const dupHash = stableHashForDuplicate(migrated, personaId);
 
-function newPersona({ id, color, modelLabel, presets }) {
-  const coords = { x: 0, y: 0 };
-  const meta = { calibration: 60, frivolity: 10 };
-  const avatarSrc = pickPresetAvatar(presets, coords, meta);
+  const exists = (session.answers || []).some(a => a.dup_hash === dupHash && (a.persona_id || null) === personaId);
+  if(exists){
+    toastBad(`Duplicate rejected. (hash ${dupHash})`);
+    return;
+  }
 
-  return {
-    id,
-    name: "Unnamed",
-    modelLabel: modelLabel || "",
-    color,
-    coords,
-    axes: { practicality: 50, empathy: 50, knowledge: 50, wisdom: 50 },
-    meta,
-    progress: { total: 0 }, // total points
-    history: [],
-
-    overviewPrimer: "",
-    overviewText: "",
-
-    ui: { x: 400, y: 120, z: 10 }
-  };
-}
-
-function ensureAppState(presets) {
-  const loaded = loadState();
-  if (loaded && loaded.v === 4 && Array.isArray(loaded.personas)) return loaded;
-
-  return {
-    v: 4,
-    nextId: 1,
-    zTop: 20,
-    selectedPersonaId: null,
-    draft: {
-      // draft answers when no persona is selected yet
-      activePersonaId: null
+  const record = {
+    ...migrated,
+    persona_id: personaId,
+    model_label: (ui.modelLabel.value || "").trim(),
+    question: {
+      id: qSnap.id,
+      title: qSnap.title,
+      role: qSnap.role,
+      scenario: qSnap.scenario,
+      image: qSnap.image || null
     },
-    personas: [],
-    presetsCacheInfo: { count: presets.length, loadedAt: nowIso() }
+    saved_at: new Date().toISOString(),
+    dup_hash: dupHash
   };
-}
 
-// DOM
-const elJson = document.getElementById("jsonInput");
-const elModelLabel = document.getElementById("modelLabel");
-const elParseBtn = document.getElementById("btnParseSave");
-const elClearBtn = document.getElementById("btnClearInput");
-const elParseStatus = document.getElementById("parseStatus");
+  session.answers.push(record);
+  session.last_qid = record.qid;
 
-const elProgressPanel = document.getElementById("progressPanel");
-const elHistoryPanel = document.getElementById("historyPanel");
-const elProgressText = document.getElementById("progressText");
-const elProgressFill = document.getElementById("progressFill");
-const elHistoryList = document.getElementById("historyList");
+  // clear input on success
+  ui.jsonIn.value = "";
 
-const elPersonaLayer = document.getElementById("personaLayer");
-
-const elQuestionWindow = document.getElementById("questionWindow");
-const elQuestionText = document.getElementById("questionText");
-const elQuestionImg = document.getElementById("questionImg");
-const elNoImg = document.getElementById("noImg");
-const elToggleQuestion = document.getElementById("btnToggleQuestion");
-
-// Three
-const canvas = document.getElementById("threeCanvas");
-
-let presets = [];
-let state = null;
-let three = null;
-
-const cards = new Map();
-
-function bringToFront(personaId) {
-  const p = state.personas.find(x => x.id === personaId);
-  if (!p) return;
-  state.zTop += 1;
-  p.ui.z = state.zTop;
-  const card = cards.get(personaId);
-  if (card) card.setZ(p.ui.z);
-  saveState(state);
-}
-
-function selectPersona(personaId) {
-  state.selectedPersonaId = personaId;
-
-  for (const [id, card] of cards.entries()) {
-    card.setSelected(id === personaId);
+  // show clarification if needed
+  if(record.needs_clarification?.is_needed){
+    const re = record.needs_clarification;
+    ui.clarifyBox.textContent =
+      `Why: ${re.why}\n\nRe-explain:\n${re.re_explain}\n\nRe-ask prompt:\n${re.re_ask_prompt}`;
   }
 
-  renderSidebar();
-  saveState(state);
-}
-
-function deselectPersona() {
-  state.selectedPersonaId = null;
-  for (const [, card] of cards.entries()) card.setSelected(false);
-  renderSidebar();
-  saveState(state);
-}
-
-function removePersona(personaId) {
-  const idx = state.personas.findIndex(p => p.id === personaId);
-  if (idx < 0) return;
-
-  const card = cards.get(personaId);
-  if (card) {
-    card.destroy();
-    cards.delete(personaId);
-  }
-
-  state.personas.splice(idx, 1);
-
-  if (state.selectedPersonaId === personaId) state.selectedPersonaId = null;
-
-  syncThreePins();
-  renderSidebar();
-  saveState(state);
-}
-
-function renamePersona(personaId, name) {
-  const p = state.personas.find(x => x.id === personaId);
-  if (!p) return;
-  p.name = name;
-  const card = cards.get(personaId);
-  if (card) card.update(p);
-  saveState(state);
-}
-
-function toggleExpandPersona(personaId) {
-  const card = cards.get(personaId);
-  if (!card) return;
-  card.setExpanded(!card.expanded);
-}
-
-function ensurePersonaExistsForDraft(modelLabel) {
-  // if no persona selected, we still want progress/history to show after first answer
-  let activeId = state.draft.activePersonaId;
-  let p = activeId ? state.personas.find(x => x.id === activeId) : null;
-
-  if (!p) {
-    const id = state.nextId++;
-    const color = COLORS[(id - 1) % COLORS.length];
-    p = newPersona({ id, color, modelLabel, presets });
-    p.ui.x = 390 + (id * 16);
-    p.ui.y = 120 + (id * 12);
-    p.ui.z = (state.zTop += 1);
-
-    state.personas.push(p);
-    state.draft.activePersonaId = id;
-
-    makeCard(p);
-    syncThreePins();
-  }
-
-  return p;
-}
-
-function makeCard(p) {
-  const card = new PersonaCard({
-    parentEl: document.getElementById("personaLayer"),
-    persona: p,
-    onSelect: (id) => selectPersona(id),
-    onDelete: (id) => removePersona(id),
-    onRename: (id, name) => renamePersona(id, name),
-    onToggleExpand: (id) => toggleExpandPersona(id),
-    bringToFront: (id) => bringToFront(id)
-  });
-
-  cards.set(p.id, card);
-}
-
-function syncThreePins() {
-  if (!three) return;
-  const personas = state.personas.map(p => ({
-    id: p.id,
-    color: p.color,
-    coords: p.coords
-  }));
-  three.setPins(personas);
-}
-
-function renderSidebar() {
-  // if a persona is selected, show its progress/history
-  // if none selected, show the draft persona (the one being built), if any answered exists
-  let p = null;
-
-  if (state.selectedPersonaId != null) {
-    p = state.personas.find(x => x.id === state.selectedPersonaId) || null;
-  } else if (state.draft.activePersonaId != null) {
-    p = state.personas.find(x => x.id === state.draft.activePersonaId) || null;
-  }
-
-  const hasAnyAnswers = p && p.history.length > 0;
-
-  if (!hasAnyAnswers) {
-    elProgressPanel.classList.add("hidden");
-    elHistoryPanel.classList.add("hidden");
-    return;
-  }
-
-  elProgressPanel.classList.remove("hidden");
-  elHistoryPanel.classList.remove("hidden");
-
-  const total = p.progress.total;
-  const cap = 100;
-  const pct = clamp(total / cap, 0, 1) * 100;
-
-  elProgressText.textContent = `${total}/100`;
-  elProgressFill.style.width = `${pct}%`;
-
-  elHistoryList.innerHTML = "";
-  for (let i = p.history.length - 1; i >= 0; i--) {
-    const h = buildHistoryItem(p.history[i]);
-    const div = document.createElement("div");
-    div.className = "history-item";
-    div.innerHTML = `
-      <div class="history-top">
-        <div class="history-title">${escapeHtml(h.title)}</div>
-        <div class="history-meta">${escapeHtml(h.meta)}</div>
-      </div>
-      <div class="history-body">${escapeHtml(h.body)}</div>
-    `;
-    elHistoryList.appendChild(div);
-  }
-}
-
-function escapeHtml(s) {
-  return String(s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function setQuestionWindowVisible(visible) {
-  elQuestionWindow.classList.toggle("hidden", !visible);
-}
-
-function showQuestion({ text, imgSrc }) {
-  elQuestionText.textContent = text || "";
-  if (imgSrc) {
-    elQuestionImg.src = imgSrc;
-    elQuestionImg.style.display = "block";
-    elNoImg.style.display = "none";
-  } else {
-    elQuestionImg.removeAttribute("src");
-    elQuestionImg.style.display = "none";
-    elNoImg.style.display = "grid";
-  }
-  setQuestionWindowVisible(true);
-}
-
-function initQuestionWindowLogic() {
-  elToggleQuestion.addEventListener("click", () => {
-    const hidden = elQuestionWindow.classList.contains("hidden");
-    setQuestionWindowVisible(hidden);
-  });
-}
-
-function initDeselectOnBackground() {
-  // click anywhere on main stage background (but not on cards/sidebar) deselects persona
-  document.getElementById("stage").addEventListener("pointerdown", (e) => {
-    const inSidebar = e.target.closest("#sidebar");
-    const inCard = e.target.closest(".persona-card");
-    const inQuestion = e.target.closest("#questionWindow");
-    if (inSidebar || inCard || inQuestion) return;
-    // if they click background but not the canvas, still deselect
-    deselectPersona();
-  });
-}
-
-function parseAndSave() {
-  const text = elJson.value.trim();
-  const modelLabel = elModelLabel.value.trim();
-
-  if (!text) {
-    elParseStatus.textContent = "Paste JSON first.";
-    return;
-  }
-
-  const obj = safeParseJson(text);
-  if (!obj) {
-    elParseStatus.textContent = "Invalid JSON.";
-    return;
-  }
-
-  // You can paste either:
-  // - scoring JSON (with axes + effort.points_awarded)
-  // - overview JSON (with overview_text / overview_primer)
-  //
-  // For now, we treat anything with axes or effort as a scoring entry.
-
-  const hasAxes = !!obj.axes || !!obj.practicality || !!(obj.axis_scores && typeof obj.axis_scores === "object");
-  const hasEffort = obj.effort?.points_awarded != null || obj.effort_points != null;
-
-  // pick persona target:
-  let p = null;
-  if (state.selectedPersonaId != null) {
-    p = state.personas.find(x => x.id === state.selectedPersonaId) || null;
-  } else {
-    // draft mode
-    p = ensurePersonaExistsForDraft(modelLabel);
-  }
-
-  if (!p) {
-    elParseStatus.textContent = "No persona target found.";
-    return;
-  }
-
-  // update persona model label if provided
-  if (modelLabel) p.modelLabel = modelLabel;
-
-  if (hasAxes || hasEffort) {
-    const entry = normalizeScoringEntry(obj, modelLabel);
-    p.history.push(entry);
-
-    // progress
-    const pts = clamp(entry.effort_points || 0, 0, 50);
-    p.progress.total += pts;
-
-    // axes/meta
-    if (entry.axes) p.axes = entry.axes;
-    if (entry.meta) p.meta = entry.meta;
-
-    // coords
-    if (entry.quadrant_position && typeof entry.quadrant_position.x === "number" && typeof entry.quadrant_position.y === "number") {
-      p.coords = {
-        x: clamp(entry.quadrant_position.x, -50, 50),
-        y: clamp(entry.quadrant_position.y, -50, 50)
+  // if draft hit 100, auto-create persona from all draft answers
+  if(personaId === null){
+    const draftAgg = computeAggregate(answersForTarget(session, null));
+    if(shouldAutoCreatePersonaFromDraft(draftAgg)){
+      const pid = newId("persona");
+      const newPersona = {
+        id: pid,
+        created_at: new Date().toISOString(),
+        name: "Unnamed",
+        avatar: null,
+        overview: null,
+        ui: { expanded: false }
       };
-    } else if (p.axes) {
-      p.coords = computeCoordsFromAxes(p.axes);
+      session.personas.push(newPersona);
+
+      // assign all draft answers to this new persona
+      for(const a of session.answers){
+        if((a.persona_id || null) === null){
+          a.persona_id = pid;
+        }
+      }
+
+      // auto select the new persona
+      selectedPersonaId = pid;
+      session.selected_persona_id = pid;
+
+      // give it a default position on the right, stacked
+      const idx = session.personas.length - 1;
+      session.ui.persona_positions[pid] = { x: 24, y: 180 + idx * 30 };
+
+      toastOk("Persona created from draft.");
+    }
+  }
+
+  saveSession(session);
+
+  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+  renderAll();
+  toastOk(`Saved. hash ${dupHash}`);
+});
+
+ui.btnNext.addEventListener("click", () => {
+  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+  renderAll();
+  toastOk("Skipped.");
+});
+
+ui.btnReset.addEventListener("click", () => {
+  if(!confirm("Reset local data for this site?")) return;
+  clearSession();
+  session = loadSession();
+  selectedPersonaId = null;
+  ui.jsonIn.value = "";
+  ui.modelLabel.value = "";
+  currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+  renderAll();
+  toastOk("Reset done.");
+});
+
+ui.btnExport.addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(session, null, 2)], { type:"application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "persona3d-session.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toastOk("Exported session JSON.");
+});
+
+ui.fileImport.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if(!file) return;
+  const text = await file.text();
+
+  try{
+    const obj = JSON.parse(text);
+    if(!obj || typeof obj !== "object") throw new Error("bad");
+
+    // normalize-ish
+    if(!Array.isArray(obj.answers)) obj.answers = [];
+    if(!Array.isArray(obj.personas)) obj.personas = [];
+    if(!obj.ui || typeof obj.ui !== "object") obj.ui = {};
+    if(!obj.ui.persona_positions || typeof obj.ui.persona_positions !== "object") obj.ui.persona_positions = {};
+
+    // migrate answers to v3 if needed
+    obj.answers = obj.answers.map(a => migrateImportedAnswer(a)).filter(Boolean);
+
+    // ensure persona ids exist
+    const pids = new Set(obj.personas.map(p => p.id));
+    for(const a of obj.answers){
+      const pid = a.persona_id || null;
+      if(pid !== null && !pids.has(pid)){
+        // orphaned, move to draft
+        a.persona_id = null;
+      }
     }
 
-    // avatar preset pick
-    p.avatarSrc = pickPresetAvatar(presets, p.coords, p.meta);
+    session = obj;
 
-    // unlock: keep expand button disabled until 100 (handled in card render)
+    // keep selection if valid
+    selectedPersonaId = (typeof session.selected_persona_id === "string") ? session.selected_persona_id : null;
+    if(selectedPersonaId && !session.personas.some(p => p.id === selectedPersonaId)){
+      selectedPersonaId = null;
+      session.selected_persona_id = null;
+    }
 
-    // update card and pins
-    const card = cards.get(p.id);
-    if (card) card.update(p);
+    saveSession(session);
+    currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+    renderAll();
+    toastOk("Imported session.");
+  }catch{
+    toastBad("Import failed. Not valid session JSON.");
+  }finally{
+    ui.fileImport.value = "";
+  }
+});
 
-    syncThreePins();
-    renderSidebar();
+function migrateImportedAnswer(a){
+  // Accept wrapped answers from earlier patch versions
+  if(!a || typeof a !== "object") return null;
 
-    // clear input every time, no confusion, no dup panic
-    elJson.value = "";
+  // If it already has schema_version, migrate via validator
+  if(a.schema_version){
+    const v = validateAndMigrateModelJson(a);
+    if(!v.ok) return null;
 
-    elParseStatus.textContent = `Saved. +${pts} points. Total: ${p.progress.total}/100`;
+    const qid = v.migrated.qid;
+    const qSnap = QUESTIONS.find(q => q.id === qid) || QUESTIONS[0];
 
-    saveState(state);
+    const personaId = (typeof a.persona_id === "string") ? a.persona_id : null;
+
+    const wrapped = {
+      ...v.migrated,
+      persona_id: personaId,
+      model_label: (a.model_label || "").trim(),
+      question: a.question || {
+        id: qSnap.id, title: qSnap.title, role: qSnap.role, scenario: qSnap.scenario, image: qSnap.image || null
+      },
+      saved_at: a.saved_at || new Date().toISOString()
+    };
+    wrapped.dup_hash = a.dup_hash || stableHashForDuplicate(v.migrated, personaId);
+    return wrapped;
+  }
+
+  // Otherwise, it is probably already wrapped, keep best-effort
+  a.persona_id = (typeof a.persona_id === "string") ? a.persona_id : null;
+  a.dup_hash = a.dup_hash || stableHashForDuplicate(a, a.persona_id || null);
+  return a;
+}
+
+function renderAll(){
+  renderQuestion();
+  renderViz();
+  renderPersonaCards();
+  renderLeftPanel();
+}
+
+function renderQuestion(){
+  ui.qMeta.textContent =
+    `${currentQuestion.id} • ${currentQuestion.title}\nRole: ${currentQuestion.role}\nTags: ${(currentQuestion.tags || []).join(", ")}`;
+
+  ui.qBody.textContent = currentQuestion.scenario;
+  ui.qPrintTitle.textContent = `${currentQuestion.id} • ${currentQuestion.title}`;
+  ui.qPrintBody.textContent = currentQuestion.scenario;
+
+  // image
+  const src = currentQuestion.image || "";
+  if(src){
+    ui.qImg.onload = () => {
+      ui.qImg.style.display = "block";
+      ui.qImgPlaceholder.style.display = "none";
+    };
+    ui.qImg.onerror = () => {
+      ui.qImg.style.display = "none";
+      ui.qImgPlaceholder.style.display = "flex";
+    };
+    ui.qImg.src = src;
+  }else{
+    ui.qImg.style.display = "none";
+    ui.qImgPlaceholder.style.display = "flex";
+  }
+
+  // mode pill
+  ui.pillMode.textContent = selectedPersonaId ? "Persona selected" : "Draft";
+}
+
+function renderViz(){
+  // pin should follow selected persona agg if selected, else draft agg
+  const agg = computeAggregate(targetAnswers());
+  viz.setQuadrantXY(agg.quadrant.x, agg.quadrant.y);
+}
+
+function renderPersonaCards(){
+  mountPersonaCards({
+    layerEl: ui.personaLayer,
+    session,
+    personas: session.personas || [],
+    selectedId: selectedPersonaId,
+    getAggForPersona: (pid) => computeAggregate(answersForTarget(session, pid)),
+    getPointsForPersona: (pid) => computeAggregate(answersForTarget(session, pid)).points,
+    getAnswersForPersona: (pid) => answersForTarget(session, pid),
+    onSelect: (pid) => {
+      selectedPersonaId = pid;
+      session.selected_persona_id = pid;
+      saveSession(session);
+      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+      renderAll();
+    },
+    onDeselect: () => {
+      selectedPersonaId = null;
+      session.selected_persona_id = null;
+      saveSession(session);
+      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+      renderAll();
+    },
+    onUpdatePersona: (sess, persona, patch, silentPosOnly=false) => {
+      const i = sess.personas.findIndex(x => x.id === persona.id);
+      if(i < 0) return;
+
+      const next = { ...sess.personas[i], ...patch };
+
+      // name lock-in behavior: show display, hide edit
+      // handled in persona_card.js via blur; we just store value here
+      sess.personas[i] = next;
+
+      if(!silentPosOnly){
+        // nothing special
+      }
+
+      saveSession(sess);
+      renderAll();
+    },
+    onRemovePersona: (pid) => {
+      // remove persona and its answers
+      session.answers = session.answers.filter(a => (a.persona_id || null) !== pid);
+      session.personas = session.personas.filter(p => p.id !== pid);
+      delete session.ui.persona_positions[pid];
+
+      if(selectedPersonaId === pid){
+        selectedPersonaId = null;
+        session.selected_persona_id = null;
+      }
+
+      saveSession(session);
+      currentQuestion = pickNextQuestion(QUESTIONS, targetAnswers(), session.last_qid);
+      renderAll();
+    },
+    onCopyText: async (text) => {
+      await copyText(text);
+    }
+  });
+}
+
+function renderLeftPanel(){
+  if(!selectedPersonaId){
+    ui.progressPlaceholder.style.display = "block";
+    ui.progressInner.style.display = "none";
+    ui.historyPlaceholder.style.display = "block";
+    ui.history.style.display = "none";
+
+    ui.pillQuadrant.textContent = "Quadrant: —";
+    ui.pillSaved.textContent = "Saved: 0";
     return;
   }
 
-  // overview payload fallback
-  const primer = obj.overview_primer || obj.primer || "";
-  const overviewText = obj.overview_text || obj.overview || "";
+  const answers = answersForTarget(session, selectedPersonaId);
+  const agg = computeAggregate(answers);
 
-  if (primer || overviewText) {
-    if (primer) p.overviewPrimer = typeof primer === "string" ? primer : JSON.stringify(primer, null, 2);
-    if (overviewText) p.overviewText = typeof overviewText === "string" ? overviewText : JSON.stringify(overviewText, null, 2);
+  ui.progressPlaceholder.style.display = "none";
+  ui.progressInner.style.display = "block";
+  ui.historyPlaceholder.style.display = "none";
+  ui.history.style.display = "flex";
 
-    const card = cards.get(p.id);
-    if (card) card.update(p);
+  ui.pillQuadrant.textContent = `Quadrant: ${agg.quadrant.label}`;
+  ui.progressFill.style.width = `${agg.points.now}%`;
+  ui.ptsNow.textContent = String(agg.points.now);
+  ui.ptsTotal.textContent = String(agg.points.total);
 
-    elJson.value = "";
-    elParseStatus.textContent = "Saved overview info.";
-    saveState(state);
-    return;
+  ui.vPracticality.textContent = String(agg.axes.practicality);
+  ui.vEmpathy.textContent = String(agg.axes.empathy);
+  ui.vKnowledge.textContent = String(agg.axes.knowledge);
+  ui.vWisdom.textContent = String(agg.axes.wisdom);
+  ui.vCalibration.textContent = String(agg.meta.calibration);
+  ui.vFrivolity.textContent = String(agg.meta.frivolity);
+
+  ui.pillSaved.textContent = `Saved: ${answers.length}`;
+
+  renderHistory(answers);
+}
+
+function renderHistory(answers){
+  ui.history.innerHTML = "";
+  const list = [...answers].reverse();
+
+  for(const a of list){
+    const div = document.createElement("div");
+    div.className = "hitem";
+
+    const title = a.question?.title || "Unknown";
+    const prof = a.notes?.one_sentence_profile ?? "";
+    const flags = a.risk_flags || {};
+    const flagStr = [
+      flags.missed_point ? "missed_point" : null,
+      flags.likely_trolling ? "likely_trolling" : null,
+      flags.delusion_risk ? "delusion_risk" : null,
+      flags.cruelty_risk ? "cruelty_risk" : null
+    ].filter(Boolean).join(", ");
+
+    const modelLine = a.model_label ? `Model: ${escapeHtml(a.model_label)}` : "Model: (unspecified)";
+    const pts = a.effort?.points_awarded ?? "?";
+
+    div.innerHTML = `
+      <div class="hrow">
+        <div class="htitle">${escapeHtml(a.qid)} • ${escapeHtml(title)}</div>
+        <div class="hmeta">
+          ${new Date(a.saved_at || Date.now()).toLocaleString()}
+          <br/>${modelLine}
+        </div>
+      </div>
+      <div class="hmini">
+        points: ${escapeHtml(String(pts))} • hash ${escapeHtml(a.dup_hash || "")}
+        <br/>Practicality ${a.axes?.practicality ?? "?"}, Empathy ${a.axes?.empathy ?? "?"}, Knowledge ${a.axes?.knowledge ?? "?"}, Wisdom ${a.axes?.wisdom ?? "?"}
+        <br/>Calibration ${a.meta?.calibration ?? "?"}, Frivolity ${a.meta?.frivolity ?? "?"}
+        ${flagStr ? `<br/>flags: ${escapeHtml(flagStr)}` : ""}
+        ${prof ? `<br/>${escapeHtml(prof)}` : ""}
+      </div>
+    `;
+    ui.history.appendChild(div);
   }
-
-  elParseStatus.textContent = "JSON parsed, but it did not match scoring or overview fields.";
 }
 
-function normalizeScoringEntry(obj, modelLabel) {
-  // Support multiple shapes, keep it forgiving.
-
-  const axes =
-    obj.axes ||
-    obj.axis_scores ||
-    (obj.practicality != null ? {
-      practicality: obj.practicality,
-      empathy: obj.empathy,
-      knowledge: obj.knowledge,
-      wisdom: obj.wisdom
-    } : null);
-
-  const meta =
-    obj.meta ||
-    obj.meta_axes ||
-    (obj.calibration != null ? {
-      calibration: obj.calibration,
-      frivolity: obj.frivolity ?? obj.playfulness ?? 10
-    } : null);
-
-  const effort =
-    obj.effort?.points_awarded ??
-    obj.effort_points ??
-    obj.effortPoints ??
-    0;
-
-  const entry = {
-    timestamp: nowIso(),
-    modelLabel: modelLabel || "",
-    question_id: obj.question_id || "",
-    question_title: obj.question_title || "",
-    summary: obj.summary || "",
-    raw_excerpt: obj.raw_excerpt || "",
-
-    axes: axes ? {
-      practicality: clamp(axes.practicality ?? 50, 0, 100),
-      empathy: clamp(axes.empathy ?? 50, 0, 100),
-      knowledge: clamp(axes.knowledge ?? 50, 0, 100),
-      wisdom: clamp(axes.wisdom ?? 50, 0, 100)
-    } : null,
-
-    meta: meta ? {
-      calibration: clamp(meta.calibration ?? 60, 0, 100),
-      frivolity: clamp(meta.frivolity ?? meta.playfulness ?? 10, 0, 100)
-    } : { calibration: 60, frivolity: 10 },
-
-    effort_points: clamp(effort, 0, 50),
-    quadrant_position: obj.quadrant_position || obj.quadrant || null
-  };
-
-  return entry;
-}
-
-function initInputButtons() {
-  elParseBtn.addEventListener("click", parseAndSave);
-  elClearBtn.addEventListener("click", () => {
-    elJson.value = "";
-    elParseStatus.textContent = "";
-  });
-}
-
-async function boot() {
-  presets = await loadPresets();
-  state = ensureAppState(presets);
-
-  // create existing cards
-  for (const p of state.personas) {
-    // ensure avatar with presets
-    if (!p.avatarSrc) p.avatarSrc = pickPresetAvatar(presets, p.coords || { x: 0, y: 0 }, p.meta || { calibration: 60, frivolity: 10 });
-    makeCard(p);
+async function copyText(text){
+  try{
+    await navigator.clipboard.writeText(text);
+  }catch{
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
   }
-
-  // three viz
-  three = createThreeViz(canvas, () => {
-    // hide question window when background is touched
-    setQuestionWindowVisible(false);
-  });
-
-  syncThreePins();
-  initInputButtons();
-  initQuestionWindowLogic();
-  initDeselectOnBackground();
-
-  // click on canvas background should also deselect a persona and hide question
-  canvas.addEventListener("pointerdown", () => {
-    setQuestionWindowVisible(false);
-    deselectPersona();
-  });
-
-  // start with question visible so user knows where to look
-  showQuestion({ text: "Paste LLM JSON to start. Click the 3D plane to hide this window.", imgSrc: "" });
-
-  // restore selected
-  if (state.selectedPersonaId != null) selectPersona(state.selectedPersonaId);
-  else renderSidebar();
-
-  saveState(state);
 }
 
-boot();
+function toastOk(msg){
+  ui.pillStatus.textContent = "OK";
+  ui.pillStatus.className = "pill";
+  ui.parseMsg.className = "msg ok";
+  ui.parseMsg.textContent = msg;
+}
+
+function toastBad(msg){
+  ui.pillStatus.textContent = "Check";
+  ui.pillStatus.className = "pill pill-warn";
+  ui.parseMsg.className = "msg bad";
+  ui.parseMsg.textContent = msg;
+}
+
+function escapeHtml(s){
+  return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+}
